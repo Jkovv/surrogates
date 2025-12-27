@@ -37,7 +37,7 @@ def objective(trial, train_set, val_set, coords, grid_size):
         'act_trunk': trial.suggest_categorical("act_trunk", ["Tanh", "GELU", "SiLU"])
     }
 
-    # seeds 1, 42, 100
+    # seeds 1,42,100 - arbitrarily chosen 
     seeds = [1, 42, 100]
     seed_losses = [train_and_eval(params, train_set, val_set, coords, s)[0] for s in seeds]
     return np.mean(seed_losses)
@@ -48,7 +48,7 @@ if __name__ == "__main__":
     parser.add_argument("--trials", type=int, default=None)
     args = parser.parse_args()
 
-    grid_configs = {"50": 30, "100": 20, "250": 15, "500": 10} # maybe change?
+    grid_configs = {"50": 30, "100": 20, "250": 15, "500": 10} # todo: maybe change later?
     tasks = grid_configs.keys() if args.grid == "all" else [args.grid]
 
     for current_grid in tasks:
