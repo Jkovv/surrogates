@@ -42,11 +42,11 @@ class DeepONet(nn.Module):
         out_b = self.branch(x_b) # (Batch,Seq,latent_dim*6)
         out_b = out_b.view(batch_size, seq_len, self.latent_dim, 6) # (Batch,Seq,latent_dim,6)
         
-        # trunk: (Grid_Points, latent_dim)
+        # trunk: (Grid_Points,latent_dim)
         out_t = self.trunk(x_t)
         
         # b - batch, s - sequence, l - latent, c - cytokine (6), g - grid points
-        # result: (Batch, Sequence, Grid_Points, 6)
+        # result: (Batch,Sequence,Grid_Points,6)
         out = torch.einsum('bslc,gl->bsgc', out_b, out_t)
         
         return out + self.bias
@@ -59,8 +59,8 @@ def load_data_methodology(grid_size):
     
     X_b, Y_t = [], []
     for t in range(data.shape[1] - 2):
-        X_b.append(data[:, t:t+2, :, :, :]) # (N_sim,2,G,G,6)
-        Y_t.append(data[:, t+2, :, :, :])   # (N_sim,G,G,6)
+        X_b.append(data[:, t:t+2, :, :, :]) #(N_sim,2,G,G,6)
+        Y_t.append(data[:, t+2, :, :, :])   #(N_sim,G,G,6)
     
     # X_b: (N_sim,99,Input_Dim) 
     # Input_Dim = 2*G*G*6
