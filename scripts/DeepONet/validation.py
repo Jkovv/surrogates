@@ -51,7 +51,7 @@ def train_and_eval(params, train_set, val_set, coords, seed):
         
         if current_val_loss < best_val_loss:
             best_val_loss = current_val_loss
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()} # best state
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             counter = 0
         else:
             counter += 1
