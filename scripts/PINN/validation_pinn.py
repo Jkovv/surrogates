@@ -23,12 +23,17 @@ def create_pinn_model(params, grid_size, train_data, val_data, initial_physics=N
             residuals.append(res)
         return residuals
 
+    bcs = []
+    for i in range(6):
+        bc = dde.icbc.PointSetBC(X_train, y_train[:, i:i+1], component=i)
+        bcs.append(bc)
+
     geom = dde.geometry.Rectangle([0, 0], [1, 1])
     timedomain = dde.geometry.TimeDomain(0, 100)
     geomtime = dde.geometry.GeometryXTime(geom, timedomain)
 
     data = dde.data.TimePDE(
-        geomtime, pde, [], 
+        geomtime, pde, bcs, 
         num_domain=2000, 
         anchors=X_train, 
         num_test=1000

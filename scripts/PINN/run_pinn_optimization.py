@@ -23,14 +23,14 @@ def objective(trial, grid, train, val, init_phys):
         'lr': trial.suggest_float("lr", 1e-4, 1e-3, log=True),
         'activation': trial.suggest_categorical("activation", ["tanh", "relu", "silu"])
     }
-    # stability test using seeds 1, 42, 100 
+    # seed stability evaluation
     seeds, val_losses = [1, 42, 100], []
     for s in seeds:
         dde.config.set_random_seed(s)
         model, _, _ = create_pinn_model(params, grid, train, val, init_phys)
         model.compile("adam", lr=params['lr'])
-        _, train_state = model.train(iterations=5000, display_every=1000)
-        val_losses.append(train_state.best_loss[1])
+        _, train_state = model.train(iterations=5000)
+        val_losses.append(np.sum(train_state.best_loss))
     return np.mean(val_losses)
 
 if __name__ == "__main__":
@@ -43,25 +43,23 @@ if __name__ == "__main__":
     save_dir = f"models/pinn_dde/{args.grid}x{args.grid}"
     os.makedirs(save_dir, exist_ok=True)
 
-    # warm start logic 
     init_phys = None
     if args.warm_start and os.path.exists(args.warm_start):
         with open(args.warm_start, 'r') as f:
             init_phys = json.load(f).get('learned_physics')
-            print(f"Warm start: loading physics from {args.warm_start}")
 
-    # optuna -> hyperparams searching
     study = optuna.create_study(direction="minimize")
     study.optimize(lambda t: objective(t, args.grid, train, val, init_phys), n_trials=10)
 
-    # final training with best config
     best_p = study.best_params
     dde.config.set_random_seed(42)
     model, D_v, k_v = create_pinn_model(best_p, args.grid, train, val, init_phys)
     model.compile("adam", lr=best_p['lr'])
     model.train(iterations=10000)
 
-    # sving results 
+    # saving 
+    model.save(os.path.join(save_dir, "pinn_model"))
+
     report = {
         "best_params": best_p,
         "learned_physics": {
@@ -72,4 +70,3 @@ if __name__ == "__main__":
     }
     with open(os.path.join(save_dir, "research_report.json"), "w") as f:
         json.dump(report, f, indent=4)
-    print(f"PINN {args.grid}x{args.grid} optimization finished.")
