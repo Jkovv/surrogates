@@ -12,7 +12,7 @@ def create_pinn_model(params, grid_size, train_data, val_data, initial_physics=N
     else:
         D_init, k_init = np.array(initial_physics['D']), np.array(initial_physics['k'])
     
-    # inverse problem (todo: fix)
+    # inverse problem (todo: fix?)
     D_var = [dde.Variable(d) for d in D_init]
     k_var = [dde.Variable(k) for k in k_init]
 

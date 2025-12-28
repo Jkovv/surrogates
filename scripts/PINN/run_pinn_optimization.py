@@ -5,7 +5,6 @@ from core_pinn import load_data_pinn
 from validation_pinn import create_pinn_model
 
 def run_window_evaluation(model, test_set):
-    """Calculates MSE for research temporal windows [cite: 2025-12-27]."""
     X_test, Y_test = test_set
     windows = {"Window_82_100": (82, 101), "Window_72_89": (72, 90)}
     results = {}
@@ -24,7 +23,7 @@ def objective(trial, grid, train, val, init_phys):
         'lr': trial.suggest_float("lr", 1e-4, 1e-3, log=True),
         'activation': trial.suggest_categorical("activation", ["tanh", "relu", "silu"])
     }
-    # Stability test using seeds 1, 42, 100 
+    # stability test using seeds 1, 42, 100 
     seeds, val_losses = [1, 42, 100], []
     for s in seeds:
         dde.config.set_random_seed(s)
@@ -49,7 +48,7 @@ if __name__ == "__main__":
     if args.warm_start and os.path.exists(args.warm_start):
         with open(args.warm_start, 'r') as f:
             init_phys = json.load(f).get('learned_physics')
-            print(f"--- Warm start: loading physics from {args.warm_start} ---")
+            print(f"Warm start: loading physics from {args.warm_start}")
 
     # optuna -> hyperparams searching
     study = optuna.create_study(direction="minimize")
