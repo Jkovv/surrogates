@@ -11,7 +11,8 @@ def create_model(params, train_data, val_data, b_dim, t_dim):
         [t_dim, params['hidden_size'], params['hidden_size'], params['latent_dim']],
         params['activation'], "Glorot uniform"
     )
-    
+
+    # non-negative concentrations
     net.apply_output_transform(lambda x, y: dde.backend.tf.nn.relu(y))
 
     model = dde.Model(data, net)
@@ -23,4 +24,4 @@ def train_and_eval(params, train_data, val_data, b_dim, t_dim, seed):
     model.compile("adam", lr=params['lr'])
     
     _, train_state = model.train(iterations=params['epochs'])
-    return train_state.best_loss[1], model # val loss
+    return train_state.best_loss[1], model

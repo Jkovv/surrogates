@@ -29,7 +29,7 @@ def objective(trial, train, val, b_dim, t_dim):
         'activation': trial.suggest_categorical("activation", ["tanh", "relu", "silu"]),
         'epochs': 10000 
     }
-    # avg loss across diff seeds: 1,42,100
+    # seeds: 1, 42, 100
     seeds = [1, 42, 100]
     losses = [train_and_eval(params, train, val, b_dim, t_dim, s)[0] for s in seeds]
     return np.mean(losses)
@@ -42,20 +42,23 @@ if __name__ == "__main__":
     train, val, test, coords = load_data_deeponet(int(args.grid))
     b_dim, t_dim = train[0][0].shape[1], coords.shape[1]
 
-    # hyperparameter optimization
+    # hyperparam optimization
     study = optuna.create_study(direction="minimize")
     study.optimize(lambda t: objective(t, train, val, b_dim, t_dim), n_trials=10)
 
-    # training with best params
+    # final training with best params
     best_p = study.best_params
     best_p['epochs'] = 20000 
     _, final_model = train_and_eval(best_p, train, val, b_dim, t_dim, seed=42)
 
-    # saving results
+    # saving 
     save_path = f"models/deeponet_dde/{args.grid}x{args.grid}"
     os.makedirs(save_path, exist_ok=True)
-    report = {"best_params": best_p, "window_results": evaluate_windows(final_model, test, coords)}
     
+    final_model.save(os.path.join(save_path, "deeponet_model")) #
+    
+    report = {"best_params": best_p, "window_results": evaluate_windows(final_model, test, coords)}
     with open(os.path.join(save_path, "research_report.json"), "w") as f:
         json.dump(report, f, indent=4)
-    print(f"DeepONetoptimization for {args.grid}x{args.grid} complete.")
+    
+    print(f"Finished. Saved to {save_path}")
