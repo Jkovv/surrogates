@@ -2,21 +2,18 @@ import numpy as np
 import os
 
 def get_scaled_physics(grid_size):
-    # grid-specific scaling
     nx = int(grid_size)
     true_size, s_mcs, h_mcs = 5, 60.0, 1/60.0
     areaconv = true_size**2 / nx**2
     
-    # raw biological constants 
     D_raw = np.array([2.09e-6, 3e-7, 8.49e-8, 1.45e-8, 4.07e-9, 2.6e-7])
     k_raw = np.array([0.2, 0.6, 0.5, 0.5, 0.5*0.225, 0.5*(1/25)])
     
     return D_raw * s_mcs / areaconv, k_raw * h_mcs
 
 def load_data_pinn(grid_size):
-    # 70/10/20 split
     path = f"preprocessed/{grid_size}x{grid_size}"
-    X = np.load(os.path.join(path, "X_pinn.npy"))
+    X = np.load(os.path.join(path, "X_pinn.npy")) 
     Y = np.load(os.path.join(path, "Y_pinn.npy")) 
     
     n = X.shape[0]
