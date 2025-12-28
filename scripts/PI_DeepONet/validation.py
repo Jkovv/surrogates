@@ -1,5 +1,4 @@
 import deepxde as dde
-import numpy as np
 
 def create_model(params, train_data, val_data, b_dim, t_dim):
     data = dde.data.Triple(
@@ -18,7 +17,6 @@ def create_model(params, train_data, val_data, b_dim, t_dim):
     model = dde.Model(data, net)
     
     def pde_loss(x, y):
-        # x[1] is the trunk input (coordinates)
         res = []
         for i in range(6):
             u_xx = dde.grad.hessian(y, x, component=i, i=0, j=0)
@@ -28,13 +26,13 @@ def create_model(params, train_data, val_data, b_dim, t_dim):
 
     model.add_physics(pde_loss) 
     
-    return model
+    return model 
 
 def train_and_eval(params, train_data, val_data, b_dim, t_dim, seed):
     dde.config.set_random_seed(seed)
-    model, pde_fn = create_model(params, train_data, val_data, b_dim, t_dim)
-    
+    model = create_model(params, train_data, val_data, b_dim, t_dim) 
     model.compile("adam", lr=params['lr'], loss_weights=[1.0, params['pde_weight']])
     
     _, train_state = model.train(iterations=params['epochs'])
+    
     return train_state.best_loss[1], model
