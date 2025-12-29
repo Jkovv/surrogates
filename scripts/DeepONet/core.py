@@ -1,33 +1,40 @@
 import os
 import numpy as np
 
+def rescale_branch_input(data, target_res=50):
+    n, h, w, c = data.shape
+    if h == target_res: return data
+    
+    factor = h // target_res
+    reshaped = data[:, :target_res*factor, :target_res*factor, :]
+    reshaped = reshaped.reshape(n, target_res, factor, target_res, factor, c)
+    return reshaped.mean(axis=(2, 4))
+
 def load_data_deeponet(grid_size):
     path = f"preprocessed/{grid_size}x{grid_size}"
-    data = np.load(os.path.join(path, "Y_target.npy")) 
-    coords = np.load(os.path.join(path, "X_trunk.npy"))
-    
-    X_b, Y_t = [], []
-    # t, t+1 -> t+2
-    for t in range(data.shape[1] - 2):
-        X_b.append(data[:, t:t+2, :, :, :]) 
-        Y_t.append(data[:, t+2, :, :, :])   
-    
-    X_b = np.array(X_b).transpose(1, 0, 2, 3, 4, 5).reshape(data.shape[0], 99, -1)
-    Y_t = np.array(Y_t).transpose(1, 0, 2, 3, 4).reshape(data.shape[0], 99, -1, 6)
+    raw_data = np.load(os.path.join(path, "X_branch.npy")).astype(np.float32)
+    data = raw_data[..., :6] #(T,H,W,6)
 
-    # 70/10/20 split
-    n = X_b.shape[0]
-    i_val, i_test = int(n * 0.7), int(n * 0.8)
+    branch_sensors = rescale_branch_input(data, target_res=50)
     
-    def format_for_dde(xb_slice, yt_slice):
-        num_sim, num_t, num_grid = xb_slice.shape[0], xb_slice.shape[1], coords.shape[0]
-        xb_flat = np.repeat(xb_slice.reshape(-1, xb_slice.shape[-1]), num_grid, axis=0) # branch 
-        xt_flat = np.tile(coords, (num_sim * num_t, 1)) # trunk
-        y_flat = yt_slice.reshape(-1, 6)
-        return (xb_flat, xt_flat), y_flat
+    n_samples = len(data) - 2
+    X_b = np.zeros((n_samples, 2, 50, 50, 6), dtype=np.float32)
+    for i in range(n_samples):
+        X_b[i] = branch_sensors[i:i+2]
+        
+    Y_t = data[2:] 
+    
+    x = np.linspace(0, 1, grid_size)
+    y = np.linspace(0, 1, grid_size)
+    gx, gy = np.meshgrid(x, y)
+    coords = np.column_stack((gx.ravel(), gy.ravel())).astype(np.float32)
+    
+    X_b_flat = X_b.reshape(n_samples, -1)
+    Y_t_3d = Y_t.reshape(n_samples, -1, 6)
 
-    train_data = format_for_dde(X_b[:i_val], Y_t[:i_val])
-    val_data = format_for_dde(X_b[i_val:i_test], Y_t[i_val:i_test])
-    test_data = (X_b[i_test:], Y_t[i_test:]) 
-
-    return train_data, val_data, test_data, coords
+    idx_val = int(n_samples * 0.7)
+    idx_test = int(n_samples * 0.8)
+    
+    return (X_b_flat[:idx_val], Y_t_3d[:idx_val]), \
+           (X_b_flat[idx_val:idx_test], Y_t_3d[idx_val:idx_test]), \
+           (X_b_flat[idx_test:], Y_t_3d[idx_test:]), coords
