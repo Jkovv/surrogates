@@ -5,6 +5,11 @@ import gc
 def mse_3d(y_true, y_pred):
     return tf.reduce_mean(tf.square(y_true - y_pred))
 
+def r2_score(y_true, y_pred):
+    ss_res = tf.reduce_sum(tf.square(y_true - y_pred))
+    ss_tot = tf.reduce_sum(tf.square(y_true - tf.reduce_mean(y_true)))
+    return 1 - ss_res / (ss_tot + tf.keras.backend.epsilon())
+
 def create_model(params, train_data, val_data, b_dim, t_dim):
     data = dde.data.TripleCartesianProd(
         X_train=(train_data[0], train_data[1]), y_train=train_data[2],
@@ -25,6 +30,6 @@ def train_and_eval(params, train, val, b_dim, t_dim, seed):
     gc.collect()
     dde.config.set_random_seed(seed)
     model = create_model(params, train, val, b_dim, t_dim)
-    model.compile("adam", lr=params['lr'], metrics=[mse_3d])
+    model.compile("adam", lr=params['lr'], metrics=[mse_3d, r2_score])
     losshistory, train_state = model.train(iterations=params['epochs'], display_every=1000)
-    return train_state.best_metrics[0], model
+    return train_state, model
