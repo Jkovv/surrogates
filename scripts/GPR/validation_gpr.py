@@ -13,4 +13,4 @@ def train_and_eval_gpr(params, train_set, val_set):
     model.fit(train_set[0], train_set[1])
     y_pred = model.predict(val_set[0])
     mse = mean_squared_error(val_set[1], y_pred)
-    return mse, model
+    return mse, model 

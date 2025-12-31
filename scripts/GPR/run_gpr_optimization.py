@@ -16,20 +16,24 @@ def evaluate_windows(model, test_data):
         actual_end = min(end, max_t)
         
         if actual_start >= actual_end:
-            results[name] = "Out of test range or data too short"
+            results[name] = "Out of test range"
             continue
 
-        y_true_win = data_full[actual_start:actual_end]
-        y_true_flat = y_true_win.reshape(-1, 6)
-
-        X_win_list = []
+        mse_sum = 0
+        count = 0
+        
         for t_idx in range(actual_start, actual_end):
-            t_col = np.full((n_points, 1), time_steps[t_idx])
-            X_win_list.append(np.hstack([coords, t_col]))
+            t_val = time_steps[t_idx]
+            t_col = np.full((n_points, 1), t_val)
+            X_step = np.hstack([coords, t_col])
+            
+            y_pred_step = model.predict(X_step)
+            y_true_step = data_full[t_idx].reshape(-1, 6)
+            
+            mse_sum += mean_squared_error(y_true_step, y_pred_step)
+            count += 1
 
-        X_win = np.vstack(X_win_list)
-        y_pred = model.predict(X_win)
-        results[name] = float(mean_squared_error(y_true_flat, y_pred))
+        results[name] = float(mse_sum / count) if count > 0 else 0.0
         
     return results
 
