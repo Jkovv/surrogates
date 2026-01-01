@@ -75,8 +75,8 @@ if __name__ == "__main__":
         win_metrics = evaluate_windows_comprehensive(final_model, test_raw, coords)
         all_seed_results.append({
             "train_mse": float(train_state.best_metrics[0]),
-            "val_mse": float(train_state.best_metrics[0]), # Walidacja to tez MSE (idx 0)
-            "r2_score": float(train_state.best_metrics[1]), # R2 to drugi element (idx 1)
+            "val_mse": float(train_state.best_metrics[0]), 
+            "r2_score": float(train_state.best_metrics[1]), 
             "windows": win_metrics
         })
     report = {
