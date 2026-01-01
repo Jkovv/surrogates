@@ -3,19 +3,13 @@ import numpy as np
 import tensorflow as tf
 from core_pinn import get_scaled_physics
 
-def create_pinn_model(params, grid_size, train_data, val_data, initial_physics=None):
+def create_pinn_model(params, grid_size, train_data, val_data):
     X_train_full, y_train_full = train_data
-    
     num_anchors = min(len(X_train_full), 20000)
     idx = np.random.choice(len(X_train_full), num_anchors, replace=False)
     X_train, y_train = X_train_full[idx], y_train_full[idx]
 
-    if initial_physics is None:
-        D_init, k_init = get_scaled_physics(grid_size)
-    else:
-        D_init, k_init = np.array(initial_physics['D'], dtype=np.float32), \
-                         np.array(initial_physics['k'], dtype=np.float32)
-    
+    D_init, k_init = get_scaled_physics(grid_size)
     D_var = [dde.Variable(np.float32(d)) for d in D_init]
     k_var = [dde.Variable(np.float32(k)) for k in k_init]
 
@@ -30,8 +24,8 @@ def create_pinn_model(params, grid_size, train_data, val_data, initial_physics=N
 
     bcs = [dde.icbc.PointSetBC(X_train, y_train[:, i:i+1], component=i) for i in range(6)]
     geomtime = dde.geometry.GeometryXTime(dde.geometry.Rectangle([0, 0], [1, 1]), dde.geometry.TimeDomain(0, 100))
-
     data = dde.data.TimePDE(geomtime, pde, bcs, num_domain=2000, anchors=X_train, num_test=1000)
+    
     net = dde.nn.FNN([3] + [params['hidden_size']] * 3 + [6], params['activation'], "Glorot uniform")
     net.apply_output_transform(lambda x, y: tf.nn.relu(y))
 
