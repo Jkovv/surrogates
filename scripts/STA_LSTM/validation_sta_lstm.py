@@ -1,8 +1,12 @@
 import tensorflow as tf
+import gc
 from core_sta_lstm import STALSTM
 
 def train_and_eval_sta_lstm(params, train_set, val_set, seed, grid_size):
+    tf.keras.backend.clear_session()
+    gc.collect()
     tf.keras.utils.set_random_seed(seed)
+    
     X_train, Y_train = train_set
     X_val, Y_val = val_set
 
@@ -11,7 +15,7 @@ def train_and_eval_sta_lstm(params, train_set, val_set, seed, grid_size):
 
     b_size = 1 if grid_size >= 250 else (8 if grid_size >= 100 else 32)
 
-    history = model.fit(
+    model.fit(
         X_train, Y_train,
         validation_data=(X_val, Y_val),
         epochs=100,
@@ -19,6 +23,4 @@ def train_and_eval_sta_lstm(params, train_set, val_set, seed, grid_size):
         verbose=0,
         callbacks=[tf.keras.callbacks.EarlyStopping(patience=5, restore_best_weights=True)]
     )
-
-    val_loss = model.evaluate(X_val, Y_val, verbose=0)
-    return val_loss, model.get_weights()
+    return model
