@@ -65,4 +65,6 @@ if __name__ == "__main__":
         all_seed_results.append({"seed": s, "windows": evaluate_windows_comprehensive(model, test)})
 
     with open(os.path.join(save_dir, "research_report.json"), "w") as f:
-        json.dump({"model": "gpr", "best_params": study.best_params, "detailed_seeds": all_results}, f, indent=4)
+        json.dump({"model": "gpr", "best_params": study.best_params, "detailed_seeds": all_seed_results}, f, indent=4)
+    
+    print(f"GPR optimization and 3-seed training finished for grid {args.grid}x{args.grid}")
