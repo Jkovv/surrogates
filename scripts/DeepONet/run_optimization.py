@@ -19,16 +19,24 @@ def evaluate_windows_comprehensive(model, test_tuple, coords):
     X_b_test, Y_t_test = test_tuple
     windows = {"Window_82_100": (82, 101), "Window_72_89": (72, 90)}
     report = {}
+    
     for name, (start, end) in windows.items():
-        idx_s, idx_e = max(0, start - 80), min(len(X_b_test), end - 80)
+        # practically from 82
+        idx_s = max(0, start - 81) 
+        idx_e = min(len(X_b_test), end - 81)
+        
         if idx_s >= idx_e: continue
+        
         preds = model.predict((X_b_test[idx_s:idx_e], coords))
         targets = Y_t_test[idx_s:idx_e]
+        
         dice_list = [calculate_dice(targets[i], preds[i]) for i in range(len(targets))]
         emd_list = [calculate_emd(targets[i], preds[i]) for i in range(len(targets))]
+        
         t_means = np.mean(targets, axis=(1, 2))
         p_means = np.mean(preds, axis=(1, 2))
         r2_traj = r2_score(t_means, p_means)
+        
         report[name] = {
             "RMSE": float(np.sqrt(np.mean((preds - targets)**2))),
             "R2_Trajectory": float(r2_traj),
@@ -48,6 +56,7 @@ def objective(trial, train_raw, val_raw, b_dim, t_dim, coords):
     idx_p = np.random.choice(coords.shape[0], 2500, replace=False)
     train_data = (train_raw[0], coords[idx_p], train_raw[1][:, idx_p, :])
     val_data = (val_raw[0], coords[idx_p], val_raw[1][:, idx_p, :])
+    
     train_state, _ = train_and_eval(params, train_data, val_data, b_dim, t_dim, seed=42)
     return train_state.best_metrics[0]
 
@@ -56,29 +65,39 @@ if __name__ == "__main__":
     parser.add_argument("--grid", type=str, default="250")
     args = parser.parse_args()
     grid_size = int(args.grid)
+    
     train_raw, val_raw, test_raw, coords = load_data_deeponet(grid_size)
     b_dim, t_dim = train_raw[0].shape[1], coords.shape[1] 
+    
     study = optuna.create_study(direction="minimize")
     study.optimize(lambda t: objective(t, train_raw, val_raw, b_dim, t_dim, coords), n_trials=10)
+    
     seeds = [1, 42, 100]
     best_p = study.best_params
     best_p['epochs'] = 5000 
+    
     save_dir = f"models/deeponet_dde/{grid_size}x{grid_size}"
     os.makedirs(save_dir, exist_ok=True)
+    
     all_seed_results = []
     for s in seeds:
         idx_f = np.random.choice(coords.shape[0], min(10000, coords.shape[0]), replace=False)
         f_train = (train_raw[0], coords[idx_f], train_raw[1][:, idx_f, :])
         f_val = (val_raw[0], coords[idx_f], val_raw[1][:, idx_f, :])
+        
         train_state, final_model = train_and_eval(best_p, f_train, f_val, b_dim, t_dim, seed=s)
         final_model.save(os.path.join(save_dir, f"model_seed_{s}"))
+        
         win_metrics = evaluate_windows_comprehensive(final_model, test_raw, coords)
+        
         all_seed_results.append({
+            "seed": s,
             "train_mse": float(train_state.best_metrics[0]),
             "val_mse": float(train_state.best_metrics[0]), 
             "r2_score": float(train_state.best_metrics[1]), 
             "windows": win_metrics
         })
+        
     report = {
         "best_params": best_p,
         "stability_summary": {
@@ -88,5 +107,8 @@ if __name__ == "__main__":
         },
         "detailed_seeds": all_seed_results
     }
+    
     with open(os.path.join(save_dir, "research_report.json"), "w") as f:
         json.dump(report, f, indent=4)
+        
+    print(f"DeepONet optimization finished for grid {grid_size}")
