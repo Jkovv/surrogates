@@ -12,7 +12,7 @@ def load_data(root_path):
     model_map = {
         "gpr": "GPR",
         "sta_lstm": "STA-LSTM",
-        "pinn_dde": "PINN",
+        "pinn": "PINN",
         "deeponet_dde": "DeepONet",
         "pi_deeponet_dde": "PI-DeepONet"
     }
@@ -61,7 +61,7 @@ def generate_output(df, root_path):
 
     sns.set_theme(style="whitegrid", context="paper", font_scale=1.5)
 
-    # 2. RMSE - grid: 250 (benchmark) and 500 (SOTA)
+    # RMSE - grid: 250 (benchmark) and 500 (SOTA)
     for g_size in [250, 500]:
         mask = (df['Grid'] == g_size) & (df['Window'] == "Window_82_100")
         if df[mask].empty: continue
