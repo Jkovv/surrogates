@@ -62,7 +62,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     train, val, test = load_data_pinn(args.grid)
-    save_dir = f"models/pinn/{args.grid}x{args.grid}"; os.makedirs(save_dir, exist_ok=True)
+    
+    save_dir = f"models/pinn/{args.grid}x{args.grid}"
+    os.makedirs(save_dir, exist_ok=True)
     
     study = optuna.create_study(direction="minimize")
     study.optimize(lambda t: objective(t, args.grid, train, val), n_trials=5)
@@ -84,28 +86,21 @@ if __name__ == "__main__":
         
         train_pred = model.predict(train[0])
         val_pred = model.predict(val[0])
-        t_mse = float(np.mean((train_pred - train[1])**2))
-        v_mse = float(np.mean((val_pred - val[1])**2))
         
         detailed_seeds.append({
             "seed": s,
-            "train_mse": t_mse,
-            "val_mse": v_mse,
+            "train_mse": float(np.mean((train_pred - train[1])**2)),
+            "val_mse": float(np.mean((val_pred - val[1])**2)),
             "windows": evaluate_pinn_windows(model, test)
         })
         
     report = {
         "model": "pinn",
         "grid": args.grid,
-        "best_params": {
-            "hidden_size": best_p["hidden_size"],
-            "latent_dim": best_p.get("latent_dim", 128), 
-            "lr": best_p["lr"],
-            "activation": best_p["activation"]
-        },
+        "best_params": best_p,
         "detailed_seeds": detailed_seeds
     }
     
     with open(os.path.join(save_dir, "research_report.json"), "w") as f:
         json.dump(report, f, indent=4)
-    print(f"Done - model weights and the json saved in {save_dir}")
+    print(f"PINN saved: {save_dir}")
