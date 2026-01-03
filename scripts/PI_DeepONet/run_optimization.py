@@ -8,6 +8,11 @@ from sklearn.metrics import r2_score
 from core import load_data_pideeponet
 from validation import create_pideeponet_model
 
+def safe_mse(y_true, y_pred):
+    y_true_flat = tf.reshape(y_true, [-1, y_true.shape[-1]])
+    y_pred_flat = tf.reshape(y_pred, [-1, y_pred.shape[-1]])
+    return tf.reduce_mean(tf.square(y_true_flat - y_pred_flat))
+
 def calculate_spatial_metrics(y_true, y_pred):
     thresh = np.percentile(y_true, 90)
     mask_t, mask_p = y_true > thresh, y_pred > thresh
@@ -48,7 +53,6 @@ def objective(trial, grid, train, val, coords):
     }
     tf.keras.backend.clear_session(); gc.collect()
     model = create_pideeponet_model(params, grid, train, val, coords)
-    
     model.compile("adam", lr=params['lr'])
     _, train_state = model.train(iterations=1000)
     return float(np.sum(train_state.best_loss_test))
@@ -71,15 +75,14 @@ if __name__ == "__main__":
         dde.config.set_random_seed(s); tf.keras.utils.set_random_seed(s)
         
         model = create_pideeponet_model(best_p, args.grid, train, val, coords)
-        
-        model.compile("adam", lr=best_p['lr'], metrics=["mean squared error"])
+        model.compile("adam", lr=best_p['lr'], metrics=[safe_mse])
         
         _, train_state = model.train(iterations=5000, display_every=1000)
         model.save(os.path.join(save_dir, f"model_seed_{s}"))
         
         all_results.append({
             "seed": s,
-            "train_mse": float(train_state.best_metrics[0]), 
+            "train_mse": float(train_state.best_metrics[0]),
             "val_mse": float(train_state.best_metrics[0]),
             "windows": evaluate_windows(model, test, coords)
         })
@@ -93,4 +96,4 @@ if __name__ == "__main__":
     
     with open(os.path.join(save_dir, "research_report.json"), "w") as f:
         json.dump(report, f, indent=4)
-    print(f"PI-DeepONet finished for grid {args.grid}. Report saved.")
+    print("PI-DeepONet finished successfully.")
