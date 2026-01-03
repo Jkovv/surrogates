@@ -4,6 +4,7 @@ import tensorflow as tf
 import deepxde as dde
 from scipy.stats import wasserstein_distance
 from sklearn.metrics import r2_score
+
 from core_pinn import load_data_pinn
 from validation_pinn import create_pinn_model
 
@@ -17,19 +18,24 @@ def calculate_spatial_metrics(y_true, y_pred):
 def evaluate_pinn_windows(model, test_data):
     X_test, Y_test = test_data
     times = np.unique(X_test[:, -1])
+    
     windows = {"Window_82_100": (82, 101), "Window_72_89": (72, 90)}
     report = {}
     
     for name, (start, end) in windows.items():
         mask_w = (times >= start) & (times < end)
         w_times = times[mask_w]
-        if len(w_times) == 0: continue
         
+        if len(w_times) == 0:
+            continue
+            
         rmse_l, dice_l, emd_l, p_means, t_means = [], [], [], [], []
         for t in w_times:
             idx = np.where(X_test[:, -1] == t)[0]
             t_X, t_Y = X_test[idx], Y_test[idx]
+            
             t_pred = model.predict(t_X)
+            
             rmse_l.append(np.sqrt(np.mean((t_pred - t_Y)**2)))
             d, e = calculate_spatial_metrics(t_Y, t_pred)
             dice_l.append(d); emd_l.append(e)
@@ -62,9 +68,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     train, val, test = load_data_pinn(args.grid)
-    
-    save_dir = f"models/pinn/{args.grid}x{args.grid}"
-    os.makedirs(save_dir, exist_ok=True)
+    save_dir = f"models/pinn/{args.grid}x{args.grid}"; os.makedirs(save_dir, exist_ok=True)
     
     study = optuna.create_study(direction="minimize")
     study.optimize(lambda t: objective(t, args.grid, train, val), n_trials=5)
@@ -103,4 +107,4 @@ if __name__ == "__main__":
     
     with open(os.path.join(save_dir, "research_report.json"), "w") as f:
         json.dump(report, f, indent=4)
-    print(f"PINN saved: {save_dir}")
+    print(f"Done. Saved in {save_dir}")
