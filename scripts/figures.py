@@ -58,8 +58,8 @@ def generate_output(df, root_path):
         }).round(6)
         print(summary.to_string())
 
-    sns.set_theme(style="whitegrid", context="paper", font_scale=1.6) # todo: adjust the colors to the chosen ones 
-
+    sns.set_theme(style="whitegrid", context="paper", font_scale=1.6) # todo: adjust the colors 
+    
     for g_size in sorted(df['Grid'].unique()):
         mask = (df['Grid'] == g_size)
         if df[mask].empty: continue
