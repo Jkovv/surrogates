@@ -46,11 +46,10 @@ def generate_output(df, root_path):
     output_dir = os.path.join(root_path, "figures")
     os.makedirs(output_dir, exist_ok=True)
     
-    model_order = ["GPR", "STA-LSTM", "PINN", "DeepONet", "PI-DeepONet"]
+    model_order = ["GPR", "STA-LSTM", "PINN", "DeepONet", "PI-DeepONet"] # order 
     df['Model'] = pd.Categorical(df['Model'], categories=model_order, ordered=True)
-
-    # t=82-100 and t=72-89 
-    for win in df['Window'].unique():
+    
+    for win in sorted(df['Window'].unique(), reverse=True):
         print(f"\nRESULTS FOR {win} (Mean ± Std)")
         summary = df[df['Window'] == win].groupby(["Model", "Grid"]).agg({
             "RMSE": ["mean", "std"],
@@ -59,36 +58,61 @@ def generate_output(df, root_path):
         }).round(6)
         print(summary.to_string())
 
-    sns.set_theme(style="whitegrid", context="paper", font_scale=1.5)
+    sns.set_theme(style="whitegrid", context="paper", font_scale=1.6) # todo: adjust the colors to the chosen ones 
 
-    # RMSE - grid: 250 (benchmark) and 500 (SOTA)
-    for g_size in [250, 500]:
-        mask = (df['Grid'] == g_size) & (df['Window'] == "Window_82_100")
+    for g_size in sorted(df['Grid'].unique()):
+        mask = (df['Grid'] == g_size)
         if df[mask].empty: continue
         
-        plt.figure(figsize=(14, 7))
-        sns.barplot(data=df[mask], x="Model", y="RMSE", palette="mako")
-        plt.title(f"RMSE Comparison at Grid {g_size}x{g_size} (t=82-100h)")
+        plt.figure(figsize=(14, 8))
+        ax = sns.barplot(
+            data=df[mask], 
+            x="Model", 
+            y="RMSE", 
+            hue="Window", 
+            palette="viridis",
+            errorbar="sd",
+            capsize=.1
+        )
+        
+        plt.title(f"RMSE Performance: Comparison of Temporal Windows (Grid {g_size}x{g_size})")
+        plt.ylabel("RMSE (Log Scale)")
         plt.yscale('log')
-        plt.savefig(os.path.join(output_dir, f"rmse_comparison_{g_size}.png"), dpi=300)
+        plt.legend(title="Evaluation Window", loc='upper right')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f"rmse_windows_grid_{g_size}.png"), dpi=300)
         plt.close()
+        print(f"Generated: rmse_windows_grid_{g_size}.png")
 
-    # dice scaling
-    plt.figure(figsize=(12, 7))
-    mask_win = df['Window'] == "Window_82_100"
-    sns.lineplot(data=df[mask_win], x="Grid", y="Dice", hue="Model", style="Model", markers=True, dashes=False, lw=3)
+    plt.figure(figsize=(14, 8))
+    sns.lineplot(
+        data=df, 
+        x="Grid", 
+        y="Dice", 
+        hue="Model", 
+        style="Window", 
+        markers=True, 
+        markersize=12, 
+        lw=3
+    )
     
-    plt.title("Morphological Fidelity (Dice) vs Grid Resolution")
+    plt.title("Morphological Fidelity (Dice) across Resolutions and Windows")
     plt.xlabel("Grid Resolution (pixels)")
     plt.ylabel("Dice Coefficient")
-    plt.xlim(left=0) 
-    plt.xticks([0, 50, 100, 250, 500])
+    plt.ylim(0, 1.05)
+    plt.xticks([50, 100, 250, 500])
+    plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left')
     
-    plt.savefig(os.path.join(output_dir, "dice_scalability_all.png"), dpi=300)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "dice_scalability_windows.png"), dpi=300)
     plt.close()
+    print("Generated: dice_scalability_windows.png")
 
 if __name__ == "__main__":
     root = "/gpfs/scratch1/shared/jkowalczuk/surrogates/burns"
     data = load_data(root)
     if not data.empty:
         generate_output(data, root)
+    else:
+        print("Error: No data found in research_report.json files.")
