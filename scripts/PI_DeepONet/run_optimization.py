@@ -5,8 +5,13 @@ import deepxde as dde
 from scipy.stats import wasserstein_distance
 from sklearn.metrics import r2_score
 
-from core_pinn import load_data_pinn
-from validation_pinn import create_pinn_model
+from core import load_data_pideeponet
+from validation import create_pideeponet_model
+
+def safe_mse(y_true, y_pred):
+    y_true_flat = tf.reshape(y_true, [-1, y_true.shape[-1]])
+    y_pred_flat = tf.reshape(y_pred, [-1, y_pred.shape[-1]])
+    return tf.reduce_mean(tf.square(y_true_flat - y_pred_flat))
 
 def calculate_spatial_metrics(y_true, y_pred):
     thresh = np.percentile(y_true, 90)
@@ -15,67 +20,52 @@ def calculate_spatial_metrics(y_true, y_pred):
     emd = wasserstein_distance(y_true.flatten(), y_pred.flatten())
     return dice, emd
 
-def evaluate_pinn_windows(model, test_data, grid_size):
-    X_test, Y_test = test_data
-    times = np.unique(X_test[:, 2])
-    
+def evaluate_windows(model, test_tuple, coords):
+    X_b_test, Y_t_test = test_tuple
     windows = {"Window_82_100": (82, 101), "Window_72_89": (72, 90)}
     report = {}
-    
     for name, (start, end) in windows.items():
-        mask_w = (times >= start) & (times < end)
-        w_times = times[mask_w]
+        idx_s, idx_e = max(0, start - 81), min(len(X_b_test), end - 81)
+        if idx_s >= idx_e: continue
         
-        if len(w_times) == 0: continue
-            
-        rmse_l, dice_l, emd_l, p_means, t_means = [], [], [], [], []
+        preds = model.predict((X_b_test[idx_s:idx_e], coords))
+        targets = Y_t_test[idx_s:idx_e]
         
-        for t in w_times:
-            idx = np.where(X_test[:, 2] == t)[0]
-            t_X, t_Y = X_test[idx], Y_test[idx]
-            
-            t_pred = model.predict(t_X)
-            
-            t_Y_grid = t_Y.reshape(grid_size, grid_size, -1)
-            t_pred_grid = t_pred.reshape(grid_size, grid_size, -1)
-            
-            rmse_l.append(np.sqrt(np.mean((t_pred - t_Y)**2)))
-            d, e = calculate_spatial_metrics(t_Y_grid, t_pred_grid)
-            dice_l.append(d); emd_l.append(e)
-            
-            p_means.append(np.mean(t_pred))
-            t_means.append(np.mean(t_Y))
-            
+        d_l = [calculate_spatial_metrics(targets[i], preds[i])[0] for i in range(len(targets))]
+        e_l = [calculate_spatial_metrics(targets[i], preds[i])[1] for i in range(len(targets))]
+        
+        r2_traj = r2_score(np.mean(targets, axis=(1, 2)), np.mean(preds, axis=(1, 2)))
+        
         report[name] = {
-            "RMSE": float(np.mean(rmse_l)),
-            "Dice": float(np.mean(dice_l)),
-            "EMD": float(np.mean(emd_l)),
-            "R2_Trajectory": float(r2_score(t_means, p_means)) if len(t_means) > 1 else 0.0
+            "RMSE": float(np.sqrt(np.mean((preds - targets)**2))),
+            "Dice": float(np.mean(d_l)), 
+            "EMD": float(np.mean(e_l)),
+            "R2_Trajectory": float(r2_traj)
         }
     return report
 
-def objective(trial, grid, train, val):
+def objective(trial, grid, train, val, coords):
     params = {
-        'hidden_size': trial.suggest_int("hidden_size", 64, 128, step=32),
-        'lr': trial.suggest_float("lr", 1e-4, 1e-3, log=True),
+        'hidden_size': trial.suggest_int("hidden_size", 128, 256, step=64),
+        'latent_dim': trial.suggest_int("latent_dim", 64, 128),
+        'lr': trial.suggest_float("lr", 1e-4, 5e-4, log=True),
         'activation': trial.suggest_categorical("activation", ["tanh", "relu"])
     }
     tf.keras.backend.clear_session(); gc.collect()
-    res = create_pinn_model(params, grid, train, val)
-    model = res[0] if isinstance(res, tuple) else res
+    model = create_pideeponet_model(params, grid, train, val, coords)
     model.compile("adam", lr=params['lr'])
-    _, train_state = model.train(iterations=2000) 
+    _, train_state = model.train(iterations=1000)
     return float(np.sum(train_state.best_loss_test))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(); parser.add_argument("--grid", type=int, default=50)
     args = parser.parse_args()
     
-    train, val, test = load_data_pinn(args.grid)
-    save_dir = f"models/pinn/{args.grid}x{args.grid}"; os.makedirs(save_dir, exist_ok=True)
+    train, val, test, coords = load_data_pideeponet(args.grid)
+    save_dir = f"models/pi_deeponet_dde/{args.grid}x{args.grid}"; os.makedirs(save_dir, exist_ok=True)
     
     study = optuna.create_study(direction="minimize")
-    study.optimize(lambda t: objective(t, args.grid, train, val), n_trials=5)
+    study.optimize(lambda t: objective(t, args.grid, train, val, coords), n_trials=5)
     
     seeds, best_p = [1, 42, 100], study.best_params
     all_results = []
@@ -84,25 +74,21 @@ if __name__ == "__main__":
         tf.keras.backend.clear_session(); gc.collect()
         dde.config.set_random_seed(s); tf.keras.utils.set_random_seed(s)
         
-        res = create_pinn_model(best_p, args.grid, train, val)
-        model = res[0] if isinstance(res, tuple) else res
+        model = create_pideeponet_model(best_p, args.grid, train, val, coords)
+        model.compile("adam", lr=best_p['lr'], metrics=[safe_mse])
         
-        model.compile("adam", lr=best_p['lr'])
-        _, train_state = model.train(iterations=10000, display_every=2000)
+        _, train_state = model.train(iterations=5000, display_every=1000)
         model.save(os.path.join(save_dir, f"model_seed_{s}"))
-        
-        window_results = evaluate_pinn_windows(model, test, args.grid)
-        train_mse = float(train_state.best_metrics[0]) if train_state.best_metrics else 0.0
         
         all_results.append({
             "seed": s,
-            "train_mse": train_mse,
-            "val_mse": train_mse,
-            "windows": window_results
+            "train_mse": float(train_state.best_metrics[0]),
+            "val_mse": float(train_state.best_metrics[0]),
+            "windows": evaluate_windows(model, test, coords)
         })
         
     report = {
-        "model": "pinn",
+        "model": "pi_deeponet",
         "grid": args.grid,
         "best_params": best_p,
         "detailed_seeds": all_results
@@ -110,4 +96,4 @@ if __name__ == "__main__":
     
     with open(os.path.join(save_dir, "research_report.json"), "w") as f:
         json.dump(report, f, indent=4)
-    print("PINN finished. JSON is ready for figures.py.")
+    print("PI-DeepONet finished successfully.")
