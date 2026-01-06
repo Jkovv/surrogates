@@ -1,17 +1,10 @@
 import os, json, argparse, optuna, gc
 import numpy as np
 import tensorflow as tf
-import deepxde as dde
 from scipy.stats import wasserstein_distance
 from sklearn.metrics import r2_score
-
 from core import load_data_pideeponet
-from validation import create_pideeponet_model
-
-def safe_mse(y_true, y_pred):
-    y_true_flat = tf.reshape(y_true, [-1, y_true.shape[-1]])
-    y_pred_flat = tf.reshape(y_pred, [-1, y_pred.shape[-1]])
-    return tf.reduce_mean(tf.square(y_true_flat - y_pred_flat))
+from validation import train_and_eval
 
 def calculate_spatial_metrics(y_true, y_pred):
     thresh = np.percentile(y_true, 90)
@@ -24,6 +17,7 @@ def evaluate_windows(model, test_tuple, coords):
     X_b_test, Y_t_test = test_tuple
     windows = {"Window_82_100": (82, 101), "Window_72_89": (72, 90)}
     report = {}
+    
     for name, (start, end) in windows.items():
         idx_s, idx_e = max(0, start - 81), min(len(X_b_test), end - 81)
         if idx_s >= idx_e: continue
@@ -31,69 +25,77 @@ def evaluate_windows(model, test_tuple, coords):
         preds = model.predict((X_b_test[idx_s:idx_e], coords))
         targets = Y_t_test[idx_s:idx_e]
         
-        d_l = [calculate_spatial_metrics(targets[i], preds[i])[0] for i in range(len(targets))]
-        e_l = [calculate_spatial_metrics(targets[i], preds[i])[1] for i in range(len(targets))]
-        
+        dice_l = [calculate_spatial_metrics(targets[i], preds[i])[0] for i in range(len(targets))]
+        emd_l = [calculate_spatial_metrics(targets[i], preds[i])[1] for i in range(len(targets))]
         r2_traj = r2_score(np.mean(targets, axis=(1, 2)), np.mean(preds, axis=(1, 2)))
         
         report[name] = {
             "RMSE": float(np.sqrt(np.mean((preds - targets)**2))),
-            "Dice": float(np.mean(d_l)), 
-            "EMD": float(np.mean(e_l)),
+            "Dice": float(np.mean(dice_l)), 
+            "EMD": float(np.mean(emd_l)),
             "R2_Trajectory": float(r2_traj)
         }
     return report
 
-def objective(trial, grid, train, val, coords):
+def objective(trial, grid_size, train_raw, val_raw, coords):
     params = {
         'hidden_size': trial.suggest_int("hidden_size", 128, 256, step=64),
         'latent_dim': trial.suggest_int("latent_dim", 64, 128),
         'lr': trial.suggest_float("lr", 1e-4, 5e-4, log=True),
-        'activation': trial.suggest_categorical("activation", ["tanh", "relu"])
+        'activation': trial.suggest_categorical("activation", ["tanh", "relu"]),
+        'epochs': 1000 
     }
-    tf.keras.backend.clear_session(); gc.collect()
-    model = create_pideeponet_model(params, grid, train, val, coords)
-    model.compile("adam", lr=params['lr'])
-    _, train_state = model.train(iterations=1000)
+    idx_p = np.random.choice(coords.shape[0], min(2500, coords.shape[0]), replace=False)
+    
+    train_data = (train_raw[0], coords[idx_p], train_raw[1][:, idx_p, :])
+    val_data = (val_raw[0], coords[idx_p], val_raw[1][:, idx_p, :])
+    
+    train_state, _ = train_and_eval(params, train_data, val_data, seed=42)
     return float(np.sum(train_state.best_loss_test))
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(); parser.add_argument("--grid", type=int, default=50)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--grid", type=str, default="100")
     args = parser.parse_args()
+    grid_size = int(args.grid)
     
-    train, val, test, coords = load_data_pideeponet(args.grid)
-    save_dir = f"models/pi_deeponet_dde/{args.grid}x{args.grid}"; os.makedirs(save_dir, exist_ok=True)
+    train_raw, val_raw, test_raw, coords = load_data_pideeponet(grid_size)
     
     study = optuna.create_study(direction="minimize")
-    study.optimize(lambda t: objective(t, args.grid, train, val, coords), n_trials=5)
+    study.optimize(lambda t: objective(t, grid_size, train_raw, val_raw, coords), n_trials=10)
     
-    seeds, best_p = [1, 42, 100], study.best_params
-    all_results = []
+    best_p = study.best_params
+    best_p['epochs'] = 5000 
     
-    for s in seeds:
-        tf.keras.backend.clear_session(); gc.collect()
-        dde.config.set_random_seed(s); tf.keras.utils.set_random_seed(s)
+    save_dir = f"models/pi_deeponet_dde/{grid_size}x{grid_size}"
+    os.makedirs(save_dir, exist_ok=True)
+    
+    detailed_seeds = []
+    for s in [1, 42, 100]:
+        idx_f = np.random.choice(coords.shape[0], min(10000, coords.shape[0]), replace=False)
+        f_train = (train_raw[0], coords[idx_f], train_raw[1][:, idx_f, :])
+        f_val = (val_raw[0], coords[idx_f], val_raw[1][:, idx_f, :])
         
-        model = create_pideeponet_model(best_p, args.grid, train, val, coords)
-        model.compile("adam", lr=best_p['lr'], metrics=[safe_mse])
+        train_state, final_model = train_and_eval(best_p, f_train, f_val, seed=s)       
+        final_model.save(os.path.join(save_dir, f"model_seed_{s}"))
         
-        _, train_state = model.train(iterations=5000, display_every=1000)
-        model.save(os.path.join(save_dir, f"model_seed_{s}"))
+        win_metrics = evaluate_windows(final_model, test_raw, coords)
         
-        all_results.append({
+        detailed_seeds.append({
             "seed": s,
-            "train_mse": float(train_state.best_metrics[0]),
-            "val_mse": float(train_state.best_metrics[0]),
-            "windows": evaluate_windows(model, test, coords)
+            "train_mse": float(np.sum(train_state.best_loss_train)),
+            "val_mse": float(np.sum(train_state.best_loss_train)), 
+            "windows": win_metrics
         })
-        
+    
     report = {
         "model": "pi_deeponet",
-        "grid": args.grid,
+        "grid": grid_size,
         "best_params": best_p,
-        "detailed_seeds": all_results
+        "detailed_seeds": detailed_seeds
     }
     
     with open(os.path.join(save_dir, "research_report.json"), "w") as f:
         json.dump(report, f, indent=4)
-    print("PI-DeepONet finished successfully.")
+        
+    print(f"PI-DeepONet optimization finished for grid {grid_size}")
