@@ -76,7 +76,7 @@ if __name__ == "__main__":
     best_p = study.best_params
     best_p['epochs'] = 5000 
     
-    save_dir = f"models/deeponet_dde/{grid_size}x{grid_size}"
+    save_dir = f"models/deeponet_f/{grid_size}x{grid_size}"
     os.makedirs(save_dir, exist_ok=True)
     
     all_seed_results = []
