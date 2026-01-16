@@ -72,7 +72,7 @@ def process_mesh_resolution(folder_name):
     X_lstm = np.array([scaled_fields[i-window:i] for i in range(window, N_TIMESTEPS)])
     Y_target = np.array([scaled_fields[i] for i in range(window, N_TIMESTEPS)])
 
-    X_branch = X_lstm.reshape(n_samples, grid_size, grid_size, -1)
+    X_branch = X_lstm.transpose(0, 2, 3, 1, 4).reshape(n_samples, grid_size, grid_size, -1)
     
     X_trunk = np.zeros((n_samples, grid_size * grid_size, 3))
     for s in range(n_samples):
