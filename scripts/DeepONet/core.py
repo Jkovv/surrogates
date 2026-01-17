@@ -9,13 +9,10 @@ def build_deeponet(params, grid_size, num_cytokines=6):
             return params.suggest_int(name, 128, 256)
         return params[name]
 
-    n_filters = get_p("n_filters")
-    latent_dim = get_p("latent_dim")
-    trunk_width = get_p("trunk_width")
-    activation = get_p("activation")
+    n_filters, latent_dim = get_p("n_filters"), get_p("latent_dim")
+    trunk_width, activation = get_p("trunk_width"), get_p("activation")
     init = tf.keras.initializers.GlorotUniform()
 
-    # branch 
     branch_input = layers.Input(shape=(grid_size, grid_size, 12))
     x = layers.Conv2D(n_filters, (3, 3), padding='same', activation=activation, kernel_initializer=init)(branch_input)
     x = layers.BatchNormalization()(x)
@@ -25,7 +22,6 @@ def build_deeponet(params, grid_size, num_cytokines=6):
     x = layers.LayerNormalization()(x) 
     branch_reshaped = layers.Reshape((num_cytokines, latent_dim))(x)
 
-    # trunk  
     trunk_input = layers.Input(shape=(3,))
     y = layers.Dense(trunk_width, activation=activation, kernel_initializer=init)(trunk_input)
     y = layers.LayerNormalization()(y)
@@ -37,8 +33,6 @@ def build_deeponet(params, grid_size, num_cytokines=6):
 
     dot = layers.Multiply()([branch_reshaped, trunk_reshaped])
     merged = layers.Lambda(lambda x: tf.reduce_sum(x, axis=-1))(dot)
-    
     merged = layers.Lambda(lambda x: x * 0.1)(merged)
     final_output = layers.Activation('sigmoid')(merged)
-
     return Model(inputs=[branch_input, trunk_input], outputs=final_output)
