@@ -1,50 +1,35 @@
-import deepxde as dde
-import tensorflow as tf
-import gc
 import numpy as np
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from skimage.metrics import structural_similarity as ssim
 
-def mse_3d(y_true, y_pred):
-    return tf.reduce_mean(tf.square(y_true - y_pred))
+def calculate_window_metrics(y_true, y_pred, grid_size):
+    results = {}
+    yt_f, yp_f = y_true.flatten(), y_pred.flatten()
+    
+    results["MSE"] = float(mean_squared_error(yt_f, yp_f))
+    results["MAE"] = float(mean_absolute_error(yt_f, yp_f))
+    results["R2"] = float(r2_score(yt_f, yp_f))
 
-def r2_score(y_true, y_pred):
-    ss_res = tf.reduce_sum(tf.square(y_true - y_pred))
-    ss_tot = tf.reduce_sum(tf.square(y_true - tf.reduce_mean(y_true)))
-    return 1 - ss_res / (ss_tot + tf.keras.backend.epsilon())
+    # masked RMSE 
+    mask = y_true > 1e-8
+    results["Masked_RMSE"] = float(np.sqrt(mean_squared_error(y_true[mask], y_pred[mask]))) if np.any(mask) else 0.0
 
-def create_model(params, train_data, val_data, b_dim, t_dim, seed):
-    data = dde.data.TripleCartesianProd(
-        X_train=(train_data[0], train_data[1]), y_train=train_data[2],
-        X_test=(val_data[0], val_data[1]), y_test=val_data[2]
-    )
+    # SSIM 
+    ssim_list = []
+    for t in range(y_true.shape[0]):
+        for c in range(6):
+            s = ssim(y_true[t,:,:,c], y_pred[t,:,:,c], data_range=1.0)
+            ssim_list.append(s)
+    results["SSIM"] = float(np.mean(ssim_list))
 
-    np.random.seed(seed)
-    num_f = 128 
-    B_np = np.random.normal(scale=15.0, size=(t_dim, num_f)).astype(np.float32)
-    B_fixed = tf.constant(B_np)
-
-    def fourier_transform(x):
-        projection = 2.0 * np.pi * tf.matmul(x, B_fixed)
-        return tf.concat([tf.sin(projection), tf.cos(projection)], axis=-1)
-
-    layer_sizes_branch = [b_dim, params['hidden_size'], params['hidden_size'], params['latent_dim']]
-    layer_sizes_trunk = [num_f * 2, params['hidden_size'], params['hidden_size'], params['latent_dim']]
-
-    net = dde.nn.DeepONetCartesianProd(
-        layer_sizes_branch, layer_sizes_trunk, params['activation'], "Glorot uniform",
-        num_outputs=6, multi_output_strategy="independent"
-    )
-
-    for i in range(len(net.trunk)):
-        net.trunk[i].apply_feature_transform(fourier_transform)
-
-    net.apply_output_transform(lambda x, y: tf.nn.relu(y))
-    model = dde.Model(data, net)
-    return model
-
-def train_and_eval(params, train, val, b_dim, t_dim, seed):
-    tf.keras.backend.clear_session(); gc.collect()
-    dde.config.set_random_seed(seed)
-    model = create_model(params, train, val, b_dim, t_dim, seed)
-    model.compile("adam", lr=params['lr'], metrics=[mse_3d, r2_score])
-    losshistory, train_state = model.train(iterations=params['epochs'], display_every=1000)
-    return train_state, model
+    # spatial correlation 
+    corr_list = []
+    for t in range(y_true.shape[0]):
+        for c in range(6):
+            gt, pr = y_true[t,:,:,c].flatten(), y_pred[t,:,:,c].flatten()
+            if np.std(gt) > 1e-12 and np.std(pr) > 1e-12:
+                corr_list.append(np.corrcoef(gt, pr)[0, 1])
+            else:
+                corr_list.append(0.0)
+    results["Spatial_Correlation"] = float(np.mean(corr_list))
+    return results
