@@ -1,48 +1,44 @@
-import os
-import numpy as np
 import tensorflow as tf
+from tensorflow.keras import layers, Model
 
-def get_scaled_physics():
-    return {
-        "diff_coeffs": tf.constant([0.001] * 6, dtype=tf.float32),
-        "decay_coeffs": tf.constant([0.01] * 6, dtype=tf.float32),
-    }
+def build_deeponet(params, grid_size, num_cytokines=6):
+    def get_p(name):
+        if hasattr(params, 'suggest_int'):
+            if name == "activation": return params.suggest_categorical(name, ["gelu", "swish", "tanh"])
+            if name == "n_filters": return params.suggest_categorical(name, [32, 64])
+            return params.suggest_int(name, 128, 256)
+        return params[name]
 
-def rescale_branch_input(data, target_res=50):
-    n, h, w, c = data.shape
-    if h == target_res: return data
-    factor = h // target_res
-    reshaped = data[:, :target_res*factor, :target_res*factor, :]
-    reshaped = reshaped.reshape(n, target_res, factor, target_res, factor, c)
-    return reshaped.mean(axis=(2, 4)) 
+    n_filters = get_p("n_filters")
+    latent_dim = get_p("latent_dim")
+    trunk_width = get_p("trunk_width")
+    activation = get_p("activation")
+    init = tf.keras.initializers.GlorotUniform()
 
-def load_data_deeponet(grid_size):
-    path = f"preprocessed/{grid_size}x{grid_size}"
-    branch_path = os.path.join(path, "X_branch.npy")
+    # branch 
+    branch_input = layers.Input(shape=(grid_size, grid_size, 12))
+    x = layers.Conv2D(n_filters, (3, 3), padding='same', activation=activation, kernel_initializer=init)(branch_input)
+    x = layers.BatchNormalization()(x)
+    x = layers.MaxPooling2D((2, 2))(x)
+    x = layers.GlobalAveragePooling2D()(x)
+    x = layers.Dense(latent_dim * num_cytokines, activation=activation)(x)
+    x = layers.LayerNormalization()(x) 
+    branch_reshaped = layers.Reshape((num_cytokines, latent_dim))(x)
+
+    # trunk  
+    trunk_input = layers.Input(shape=(3,))
+    y = layers.Dense(trunk_width, activation=activation, kernel_initializer=init)(trunk_input)
+    y = layers.LayerNormalization()(y)
+    y = layers.Dense(trunk_width, activation=activation, kernel_initializer=init)(y)
+    y = layers.LayerNormalization()(y)
+    y = layers.Dense(latent_dim * num_cytokines, activation=activation)(y)
+    y = layers.LayerNormalization()(y)
+    trunk_reshaped = layers.Reshape((num_cytokines, latent_dim))(y)
+
+    dot = layers.Multiply()([branch_reshaped, trunk_reshaped])
+    merged = layers.Lambda(lambda x: tf.reduce_sum(x, axis=-1))(dot)
     
-    raw_data = np.load(branch_path).astype(np.float32)
-    data = raw_data[..., :6] 
-    
-    branch_sensors = rescale_branch_input(data, target_res=50)
-    n_samples = len(data) - 2 
-    
-    X_b = np.zeros((n_samples, 2, 50, 50, 6), dtype=np.float32)
-    for i in range(n_samples):
-        X_b[i] = branch_sensors[i:i+2]
-    
-    Y_t = data[2:]
-    
-    x = np.linspace(0, 1, grid_size)
-    y = np.linspace(0, 1, grid_size)
-    gx, gy = np.meshgrid(x, y)
-    coords = np.column_stack((gx.ravel(), gy.ravel())).astype(np.float32)
-    
-    X_b_flat = X_b.reshape(n_samples, -1)
-    Y_t_3d = Y_t.reshape(n_samples, -1, 6)
-    
-    idx_val = int(n_samples * 0.7)
-    idx_test = int(n_samples * 0.8)
-    
-    return (X_b_flat[:idx_val], Y_t_3d[:idx_val]), \
-           (X_b_flat[idx_val:idx_test], Y_t_3d[idx_val:idx_test]), \
-           (X_b_flat[idx_test:], Y_t_3d[idx_test:]), coords
+    merged = layers.Lambda(lambda x: x * 0.1)(merged)
+    final_output = layers.Activation('sigmoid')(merged)
+
+    return Model(inputs=[branch_input, trunk_input], outputs=final_output)
