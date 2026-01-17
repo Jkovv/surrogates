@@ -27,7 +27,6 @@ def run_study(grid, n_trials=15):
     def objective(trial):
         tf.keras.backend.clear_session()
         model = build_deeponet(trial, grid)
-        # Optuna wylicza optymalny LR
         lr = trial.suggest_float("lr", 1e-5, 1.5e-3, log=True)
         model.compile(optimizer=tf.keras.optimizers.Adam(lr))
         
@@ -42,7 +41,6 @@ def run_study(grid, n_trials=15):
     study = optuna.create_study(direction="minimize")
     study.optimize(objective, n_trials=n_trials)
 
-    # Finalny trening na najlepszych parametrach
     best = study.best_params
     print(f"Optimization complete. Best Params: {best}")
     model = build_deeponet(best, grid)
@@ -52,7 +50,6 @@ def run_study(grid, n_trials=15):
     
     model.save_weights(MODEL_OUT_DIR / f"weights_deeponet_{grid}.weights.h5")
 
-    # Raportowanie wyników dla okien czasowych
     windows = {"Window_82_100": (82, 101), "Window_72_89": (72, 90)}
     final_results = {"best_params": best, "per_cytokine_metrics": {}}
 
