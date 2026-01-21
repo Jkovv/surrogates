@@ -1,91 +1,75 @@
 import tensorflow as tf
 from tensorflow.keras import layers, Model
 
+class MultiScaleFourierProjection(layers.Layer):
+    def __init__(self, num_features=128, scales=[1.0, 10.0], **kwargs):
+        super().__init__(**kwargs)
+        self.num_features = num_features
+        self.scales = scales
+
+    def build(self, input_shape):
+        n_per_scale = self.num_features // len(self.scales)
+        self.B_list = [self.add_weight(
+            name=f"B_{i}", shape=(input_shape[-1], n_per_scale),
+            initializer=tf.random_normal_initializer(stddev=s), trainable=False
+        ) for i, s in enumerate(self.scales)]
+
+    def call(self, x):
+        res = []
+        for B in self.B_list:
+            p = tf.matmul(x, B)
+            res.extend([tf.sin(p), tf.cos(p)])
+        return tf.concat(res, axis=-1)
+
 class DeepONetUncertainty(Model):
     def __init__(self, branch, trunk, num_cytokines=6):
         super().__init__()
-        self.branch_net = branch
-        self.trunk_net = trunk
-        
-        self.log_vars = tf.Variable(tf.zeros(num_cytokines), trainable=True, name="loss_scales")
-        
+        self.branch_net, self.trunk_net = branch, trunk
+        self.log_vars = tf.Variable(tf.zeros(num_cytokines), trainable=True)
         self.loss_tracker = tf.keras.metrics.Mean(name="loss")
 
     @property
-    def metrics(self):
-        return [self.loss_tracker]
+    def metrics(self): return [self.loss_tracker]
 
     def call(self, inputs):
-        x_branch, x_trunk = inputs
-        b = self.branch_net(x_branch)
-        t = self.trunk_net(x_trunk)
-        
-        dot = tf.multiply(b, t)
-        merged = tf.reduce_sum(dot, axis=-1)
-        
-        return tf.nn.softplus(merged)
+        b = self.branch_net(inputs[0])
+        t = self.trunk_net(inputs[1])
+        return tf.nn.softplus(tf.reduce_sum(tf.multiply(b, t), axis=-1))
 
     def train_step(self, data):
         x, y = data
         with tf.GradientTape() as tape:
-            y_pred = self(x, training=True)
-            
-            mse_per_channel = tf.reduce_mean(tf.square(y - y_pred), axis=0)
-            
-            precision = tf.exp(-self.log_vars)
-            loss = tf.reduce_sum(precision * mse_per_channel + self.log_vars)
-
-        gradients = tape.gradient(loss, self.trainable_variables)
-        self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
-        
+            y_p = self(x, training=True)
+            mse = tf.reduce_mean(tf.square(y - y_p), axis=0)
+            loss = tf.reduce_sum(tf.exp(-self.log_vars) * mse + self.log_vars)
+        self.optimizer.apply_gradients(zip(tape.gradient(loss, self.trainable_variables), self.trainable_variables))
         self.loss_tracker.update_state(loss)
         return {"loss": self.loss_tracker.result()}
 
     def test_step(self, data):
         x, y = data
-        y_pred = self(x, training=False)
-        
-        mse_per_channel = tf.reduce_mean(tf.square(y - y_pred), axis=0)
-        precision = tf.exp(-self.log_vars)
-        loss = tf.reduce_sum(precision * mse_per_channel + self.log_vars)
-        
+        y_p = self(x, training=False)
+        mse = tf.reduce_mean(tf.square(y - y_p), axis=0)
+        loss = tf.reduce_sum(tf.exp(-self.log_vars) * mse + self.log_vars)
         self.loss_tracker.update_state(loss)
         return {"loss": self.loss_tracker.result()}
 
 def build_deeponet(params, grid_size, num_cytokines=6):
-    def get_p(name):
-        if hasattr(params, 'suggest_int'):
-            if name == "activation": return params.suggest_categorical(name, ["gelu", "swish"])
-            if name == "n_filters": return params.suggest_categorical(name, [32, 64])
-            if name == "latent_dim": return params.suggest_int(name, 128, 256)
-            if name == "trunk_width": return params.suggest_int(name, 128, 256)
-        return params[name]
-
-    n_filters = get_p("n_filters")
-    latent_dim = get_p("latent_dim")
-    trunk_width = get_p("trunk_width")
-    activation = get_p("activation")
-    init = tf.keras.initializers.HeNormal()
-
-    branch_input = layers.Input(shape=(grid_size, grid_size, 12), name="branch_input")
-    x = layers.Conv2D(n_filters, (3, 3), padding='same', activation=activation, kernel_initializer=init)(branch_input)
-    x = layers.BatchNormalization()(x)
-    x = layers.MaxPooling2D((2, 2))(x)
-    x = layers.Conv2D(n_filters * 2, (3, 3), padding='same', activation=activation, kernel_initializer=init)(x)
-    x = layers.BatchNormalization()(x)
+    act = params.get("activation", "swish")
+    lat, tw, nf = params.get("latent_dim", 162), params.get("trunk_width", 215), params.get("n_filters", 32)
+    
+    bi = layers.Input(shape=(grid_size, grid_size, 12))
+    x = layers.Conv2D(nf, (3,3), padding='same', activation=act)(bi)
+    x = layers.MaxPooling2D()(x)
+    x = layers.Conv2D(nf*2, (3,3), padding='same', activation=act)(x)
     x = layers.GlobalAveragePooling2D()(x)
-    x = layers.Dense(latent_dim * num_cytokines, activation=activation, kernel_initializer=init)(x)
-    branch_output = layers.Reshape((num_cytokines, latent_dim))(x)
-    branch_model = Model(branch_input, branch_output, name="Branch_CNN")
-
-    trunk_input = layers.Input(shape=(3,), name="trunk_input")
-    y = layers.Dense(trunk_width, activation=activation, kernel_initializer=init)(trunk_input)
-    y = layers.LayerNormalization()(y)
-    y = layers.Dense(trunk_width, activation=activation, kernel_initializer=init)(y)
-    y = layers.LayerNormalization()(y)
-    y = layers.Dense(latent_dim * num_cytokines, activation=activation, kernel_initializer=init)(y)
-    y = layers.LayerNormalization()(y)
-    trunk_output = layers.Reshape((num_cytokines, latent_dim))(y)
-    trunk_model = Model(trunk_input, trunk_output, name="Trunk_MLP")
-
-    return DeepONetUncertainty(branch_model, trunk_model, num_cytokines)
+    bo = layers.Reshape((num_cytokines, lat))(layers.Dense(lat*num_cytokines, activation=act)(x))
+    
+    ti = layers.Input(shape=(3,))
+    y = MultiScaleFourierProjection(num_features=128, scales=[1.0, 10.0])(ti)
+    y = layers.Dense(tw, activation=act)(y)
+    y = layers.Dropout(0.1)(y) 
+    y = layers.Dense(tw, activation=act)(y)
+    to = layers.Reshape((num_cytokines, lat))(layers.Dense(lat*num_cytokines, activation=act)(y))
+    
+    return DeepONetUncertainty(Model(bi, bo), Model(ti, to), num_cytokines)
