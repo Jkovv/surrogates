@@ -1,58 +1,83 @@
-import os
-import numpy as np
 import tensorflow as tf
-from tensorflow.keras import layers, models
+from tensorflow.keras import layers, Model
+import os
+import random
+import numpy as np
 
-class SpatialTemporalAttention(layers.Layer):
-    def __init__(self, hidden_size):
+def set_all_seeds(seed):
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+    os.environ['TF_DETERMINISTIC_OPS'] = '1'
+    os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
+
+class SpatialAttention(layers.Layer):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.conv = layers.Conv2D(1, kernel_size=7, padding='same', activation='sigmoid')
+
+    def call(self, inputs):
+        avg_pool = tf.reduce_mean(inputs, axis=-1, keepdims=True)
+        max_pool = tf.reduce_max(inputs, axis=-1, keepdims=True)
+        concat = tf.concat([avg_pool, max_pool], axis=-1)
+        attention_map = self.conv(concat)
+        return inputs * attention_map
+
+class STALSTMUncertainty(Model):
+    def __init__(self, grid_size, num_cytokines=6, n_filters=64, hidden_dim=256):
         super().__init__()
-        self.W_s = layers.Dense(hidden_size)
-        self.W_t = layers.Dense(hidden_size)
-        self.V = layers.Dense(1)
+        self.grid_size = grid_size
+        self.num_cytokines = num_cytokines
+        
+        self.encoder = tf.keras.Sequential([
+            layers.TimeDistributed(layers.Conv2D(n_filters, (3,3), padding='same', activation='swish')),
+            layers.TimeDistributed(layers.BatchNormalization()),
+            layers.TimeDistributed(SpatialAttention()),
+            layers.TimeDistributed(layers.MaxPooling2D((2,2))), 
+            layers.TimeDistributed(layers.Conv2D(n_filters*2, (3,3), padding='same', activation='swish')),
+            layers.TimeDistributed(layers.GlobalAveragePooling2D())
+        ])
 
-    def call(self, lstm_output, flattened_input):
-        spatial_attention = tf.tanh(self.W_s(lstm_output))
-        temporal_attention = tf.tanh(self.W_t(flattened_input))
-        attention_scores = self.V(spatial_attention * temporal_attention)
-        attention_weights = tf.nn.softmax(attention_scores, axis=1)
-        attended_output = tf.matmul(tf.transpose(attention_weights, [0, 2, 1]), lstm_output)
-        return attended_output
+        self.lstm = layers.LSTM(hidden_dim, return_sequences=False)
 
-class STALSTM(models.Model):
-    def __init__(self, hidden_size, target_shape, grid_size, act_name="ReLU"):
-        super().__init__()
-        acts = {"ReLU": "relu", "Tanh": "tanh", "SiLU": "swish", "GELU": "gelu"}
-        activation = acts.get(act_name, "relu")
-        pool_factor = grid_size // 50
-        if pool_factor > 1:
-            self.pool = layers.AveragePooling3D(pool_size=(1, pool_factor, pool_factor))
-        else:
-            self.pool = layers.Lambda(lambda x: x)
-        self.projection = layers.Dense(128, activation=activation)
-        self.lstm = layers.LSTM(hidden_size, return_sequences=True)
-        self.attention = SpatialTemporalAttention(hidden_size)
-        self.fc1 = layers.Dense(128, activation=activation) 
-        self.batch_norm = layers.BatchNormalization()
-        self.fc_out = layers.Dense(np.prod(target_shape), activation='linear', dtype='float32')
-        self.reshape_layer = layers.Reshape(target_shape, dtype='float32')
+        self.decoder = tf.keras.Sequential([
+            layers.Dense(10 * 10 * 64, activation='swish'),
+            layers.Reshape((10, 10, 64)),
+            layers.Resizing(self.grid_size, self.grid_size),
+            layers.Conv2DTranspose(64, (3,3), padding='same', activation='swish'),
+            layers.Conv2D(num_cytokines, (1,1), activation='softplus') 
+        ])
 
-    def call(self, input_data):
-        x = self.pool(input_data)
-        s = x.shape
-        x_flat = tf.reshape(x, (-1, s[1], s[2] * s[3] * s[4]))
-        x_proj = self.projection(x_flat)
-        x_lstm = self.lstm(x_proj)
-        x_att = self.attention(x_lstm, x_proj)
-        x_out_flat = tf.reshape(x_att, (-1, x_att.shape[-1]))
-        x = self.fc1(x_out_flat)
-        x = self.batch_norm(x)
-        x = self.fc_out(x)
-        return self.reshape_layer(x)
+        # uncertainty weighting (log_vars for 6 cytokines)
+        self.log_vars = tf.Variable(tf.zeros(num_cytokines), trainable=True)
+        self.loss_tracker = tf.keras.metrics.Mean(name="loss")
 
-def load_data_sta(grid_size):
-    path = f"preprocessed/{grid_size}x{grid_size}"
-    X = np.load(os.path.join(path, "X_lstm.npy")).astype(np.float32) 
-    Y = np.load(os.path.join(path, "Y_target.npy")).astype(np.float32)
-    n = X.shape[0]
-    i_val, i_test = int(n * 0.7), int(n * 0.8)
-    return (X[:i_val], Y[:i_val]), (X[i_val:i_test], Y[i_val:i_test]), (X[i_test:], Y[i_test:])
+    @property
+    def metrics(self):
+        return [self.loss_tracker]
+
+    def call(self, inputs):
+        x = self.encoder(inputs)
+        x = self.lstm(x)
+        return self.decoder(x)
+
+    def train_step(self, data):
+        x, y = data
+        with tf.GradientTape() as tape:
+            y_p = self(x, training=True)
+            mse = tf.reduce_mean(tf.square(y - y_p), axis=(0, 1, 2))
+            loss = tf.reduce_sum(tf.exp(-self.log_vars) * mse + self.log_vars)
+        
+        grads = tape.gradient(loss, self.trainable_variables)
+        self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
+        self.loss_tracker.update_state(loss)
+        return {"loss": self.loss_tracker.result()}
+
+    def test_step(self, data):
+        x, y = data
+        y_p = self(x, training=False)
+        mse = tf.reduce_mean(tf.square(y - y_p), axis=(0, 1, 2))
+        loss = tf.reduce_sum(tf.exp(-self.log_vars) * mse + self.log_vars)
+        self.loss_tracker.update_state(loss)
+        return {"loss": self.loss_tracker.result()}
