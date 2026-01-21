@@ -49,7 +49,6 @@ class STALSTMUncertainty(Model):
             layers.Conv2D(num_cytokines, (1,1), activation='softplus') 
         ])
 
-        # uncertainty weighting (log_vars for 6 cytokines)
         self.log_vars = tf.Variable(tf.zeros(num_cytokines), trainable=True)
         self.loss_tracker = tf.keras.metrics.Mean(name="loss")
 
