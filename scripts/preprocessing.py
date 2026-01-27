@@ -56,7 +56,7 @@ def process_mesh_resolution(folder_name):
             raw_coords = np.array(mesh.points).reshape(grid_size, grid_size, 3)[:, :, :2]
             coords = (raw_coords - raw_coords.min()) / (raw_coords.max() - raw_coords.min())
 
-    # scaling
+    #scaling
     scaled_fields = np.zeros_like(cytokine_fields)
     for j, cyto_name in enumerate(CYTOKINE_NAMES):
         scaler = MinMaxScaler()
@@ -77,7 +77,7 @@ def process_mesh_resolution(folder_name):
         X_trunk[s, :, :2] = coords.reshape(-1, 2)
         X_trunk[s, :, 2] = t_norm[s + window]
 
-    Y_masks_spatial = cell_masks[window:] # (n_samples, grid, grid, n_cells)
+    Y_masks_spatial = cell_masks[window:] #(n_samples,grid,grid,n_cells)
     
     Y_pinn_masks = Y_masks_spatial.reshape(n_samples, grid_size * grid_size, N_CELLS)
 
@@ -85,8 +85,8 @@ def process_mesh_resolution(folder_name):
     np.save(out_path / "Y_target.npy", Y_target)
     np.save(out_path / "X_branch.npy", X_branch)
     np.save(out_path / "X_trunk.npy", X_trunk)
-    np.save(out_path / "Y_masks.npy", Y_masks_spatial)  # Maski 2D (dla STA-LSTM)
-    np.save(out_path / "Y_pinn_masks.npy", Y_pinn_masks) # Maski punktowe (dla PINN/DeepONet)
+    np.save(out_path / "Y_masks.npy", Y_masks_spatial)  #2D masks
+    np.save(out_path / "Y_pinn_masks.npy", Y_pinn_masks) #point masks
     
     metadata = {
         "grid_size": grid_size, 
