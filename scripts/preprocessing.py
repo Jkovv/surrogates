@@ -56,22 +56,20 @@ def process_mesh_resolution(folder_name):
             raw_coords = np.array(mesh.points).reshape(grid_size, grid_size, 3)[:, :, :2]
             coords = (raw_coords - raw_coords.min()) / (raw_coords.max() - raw_coords.min())
 
-    # global scaling (0-1 normalization)
-    scaler = MinMaxScaler()
-    flat_fields = cytokine_fields.reshape(-1, N_CYTOKINES)
-    scaled_fields = scaler.fit_transform(flat_fields).reshape(N_TIMESTEPS, grid_size, grid_size, N_CYTOKINES)
-    
-    # save scaler for inverse transform (essential for valid visualisations)
-    dump(scaler, out_path / "scaler.joblib")
-    
-    # tensor generation 
+    # scaling
+    scaled_fields = np.zeros_like(cytokine_fields)
+    for j, cyto_name in enumerate(CYTOKINE_NAMES):
+        scaler = MinMaxScaler()
+        single_cyto_flat = cytokine_fields[..., j].reshape(-1, 1)
+        scaled_fields[..., j] = scaler.fit_transform(single_cyto_flat).reshape(N_TIMESTEPS, grid_size, grid_size)
+        dump(scaler, out_path / f"scaler_{cyto_name}.joblib")
+
     window = 2
     n_samples = N_TIMESTEPS - window
     t_norm = np.linspace(0, 1, N_TIMESTEPS)
 
     X_lstm = np.array([scaled_fields[i-window:i] for i in range(window, N_TIMESTEPS)])
     Y_target = np.array([scaled_fields[i] for i in range(window, N_TIMESTEPS)])
-
     X_branch = X_lstm.transpose(0, 2, 3, 1, 4).reshape(n_samples, grid_size, grid_size, -1)
     
     X_trunk = np.zeros((n_samples, grid_size * grid_size, 3))
@@ -79,24 +77,28 @@ def process_mesh_resolution(folder_name):
         X_trunk[s, :, :2] = coords.reshape(-1, 2)
         X_trunk[s, :, 2] = t_norm[s + window]
 
-    Y_masks = cell_masks[window:]
+    Y_masks_spatial = cell_masks[window:] # (n_samples, grid, grid, n_cells)
+    
+    Y_pinn_masks = Y_masks_spatial.reshape(n_samples, grid_size * grid_size, N_CELLS)
 
     np.save(out_path / "X_lstm.npy", X_lstm)
     np.save(out_path / "Y_target.npy", Y_target)
     np.save(out_path / "X_branch.npy", X_branch)
     np.save(out_path / "X_trunk.npy", X_trunk)
-    np.save(out_path / "Y_masks.npy", Y_masks) 
+    np.save(out_path / "Y_masks.npy", Y_masks_spatial)  # Maski 2D (dla STA-LSTM)
+    np.save(out_path / "Y_pinn_masks.npy", Y_pinn_masks) # Maski punktowe (dla PINN/DeepONet)
     
     metadata = {
         "grid_size": grid_size, 
         "features": CYTOKINE_NAMES, 
         "cells": list(CELL_TYPES.keys()),
-        "timesteps": N_TIMESTEPS
+        "timesteps": N_TIMESTEPS,
+        "pinn_compatible": True
     }
     with open(out_path / "metadata.json", 'w') as f:
         json.dump(metadata, f, indent=4)
     
-    print(f"Success: Saved {grid_size}x{grid_size} tensors, masks, and scaler to {out_path}")
+    print(f"Success: Saved tensors and PINN masks ({grid_size}x{grid_size}) to {out_path}")
 
 if __name__ == "__main__":
     if not BASE_LATTICE_DIR.exists():
