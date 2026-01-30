@@ -60,7 +60,6 @@ class STALSTMSingle(tf.keras.Model):
         x = self.lstm(x)
         return self.decoder(x)
 
-# metrics
 def compute_dice_coefficient(y_true, y_pred, smooth=1e-6):
     threshold = 0.1 * np.max(y_true)
     if threshold == 0: threshold = 1e-7
@@ -76,25 +75,20 @@ def compute_dice_coefficient(y_true, y_pred, smooth=1e-6):
 def calculate_metrics(y_true, y_pred, masks):
     spatial_mask = np.max(masks, axis=-1, keepdims=True) 
     
-    # masked rmse
     sq_diff = np.square(y_true - y_pred) * spatial_mask
     m_rmse = np.sqrt(np.sum(sq_diff) / (np.sum(spatial_mask) + 1e-7))
     
-    # r2
     r2 = r2_score(y_true.flatten(), y_pred.flatten())
     
     dices, corrs, ssims = [], [], []
     for t in range(y_true.shape[0]):
         gt, pr = y_true[t,:,:,0], y_pred[t,:,:,0]
         
-        # dice
         dices.append(compute_dice_coefficient(gt, pr))
         
-        ssim
         data_range = max(gt.max() - gt.min(), 1e-7)
         ssims.append(ssim(gt, pr, data_range=data_range))
         
-        # spatial corr
         if np.std(gt) > 1e-9 and np.std(pr) > 1e-9:
             corrs.append(pearsonr(gt.flatten(), pr.flatten())[0])
             
@@ -106,8 +100,8 @@ def calculate_metrics(y_true, y_pred, masks):
     return {
         "Global_R2": float(r2), 
         "Masked_RMSE": float(m_rmse),
-        "Avg_Dice": float(np.mean(dices)),      
-        "Avg_SSIM": float(np.mean(ssims)),      
+        "Avg_Dice": float(np.mean(dices)),     
+        "Avg_SSIM": float(np.mean(ssims)),    
         "Spatial_Correlation": float(np.mean(corrs)) if corrs else 0.0,
         "Peak_Lag": int(lag)
     }
@@ -136,7 +130,7 @@ def run_pipeline(grid, seed, cytokine):
         model.fit(X_all[:t_end], Y_all[:t_end], epochs=40, batch_size=4, verbose=0)
         return model.evaluate(X_all[t_end:v_end], Y_all[t_end:v_end], verbose=0)
 
-    print(f"optimizing for {cytokine}...")
+    print(f"Optimizing for {cytokine}...")
     study = optuna.create_study(direction="minimize")
     study.optimize(objective, n_trials=10) 
     
@@ -144,11 +138,10 @@ def run_pipeline(grid, seed, cytokine):
     final_model = STALSTMSingle(grid, filters=best["filters"], lstm_units=best["lstm_units"])
     final_model.compile(optimizer=tf.keras.optimizers.Adam(best["lr"]), loss="mse")
     
-    print(f">>> Training Best STA-LSTM Model...")
+    print(f"Training...")
     final_model.fit(X_all[:v_end], Y_all[:v_end], epochs=500, batch_size=4, verbose=1)
     
     final_model.save_weights(out_dir / f"weights_{suffix}.weights.h5")
-
     Y_pred = final_model.predict(X_all, verbose=0)
     
     res = {
@@ -161,7 +154,7 @@ def run_pipeline(grid, seed, cytokine):
     
     with open(out_dir / f"results_{suffix}.json", 'w') as f:
         json.dump(res, f, indent=4)
-    print(f"Success! JSON with DICE & SSIM saved: results_{suffix}.json")
+    print(f"JSON saved: results_{suffix}.json")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
