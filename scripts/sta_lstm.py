@@ -83,9 +83,7 @@ def calculate_metrics(y_true, y_pred, masks):
     dices, corrs, ssims = [], [], []
     for t in range(y_true.shape[0]):
         gt, pr = y_true[t,:,:,0], y_pred[t,:,:,0]
-        
         dices.append(compute_dice_coefficient(gt, pr))
-        
         data_range = max(gt.max() - gt.min(), 1e-7)
         ssims.append(ssim(gt, pr, data_range=data_range))
         
