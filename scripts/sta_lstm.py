@@ -112,7 +112,14 @@ def calculate_metrics(y_true, y_pred, masks):
 def run_pipeline(grid, seed, cytokine):
     set_seed(seed)
     data_path = Path(f"./preprocessed/{grid}x{grid}")
-    out_dir = Path(f"./models/sta_lstm_single_2")
+    out_dir = Path(f"./models/sta_lstm_single
+    
+    
+    
+    
+    
+    
+    ")
     out_dir.mkdir(parents=True, exist_ok=True)
     suffix = f"{cytokine}_grid{grid}_seed{seed}"
     idx = CYTOKINE_MAP[cytokine]
