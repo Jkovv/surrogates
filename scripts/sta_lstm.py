@@ -59,7 +59,7 @@ class STALSTMSingle(tf.keras.Model):
             tf.keras.layers.Conv2DTranspose(filters // 2, 3, strides=2, padding='same', activation='relu'),
             tf.keras.layers.Conv2DTranspose(filters // 4, 3, strides=2, padding='same', activation='relu'),
             
-            tf.keras.layers.Conv2D(1, 3, padding='same', activation='sigmoid')
+            tf.keras.layers.Conv2D(1, 3, padding='same', activation='sigmoid'),
             tf.keras.layers.Resizing(grid_size, grid_size)
         ])
 
@@ -67,8 +67,8 @@ class STALSTMSingle(tf.keras.Model):
         x = self.encoder(inputs)
         x = self.lstm(x)
         return self.decoder(x)
+        
 
-#  metrics 
 def compute_dice_coefficient(y_true, y_pred, smooth=1e-6):
     threshold = 0.05 
     y_true_bin = (y_true > threshold).astype(np.float32)
@@ -108,11 +108,10 @@ def calculate_metrics(y_true, y_pred, masks):
         "Spatial_Correlation": float(np.mean(corrs)) if corrs else 0.0
     }
 
-# pipeline
 def run_pipeline(grid, seed, cytokine):
     set_seed(seed)
     data_path = Path(f"./preprocessed/{grid}x{grid}")
-    out_dir = Path(f"./models/sta_lstm_single")
+    out_dir = Path(f"./models/sta_lstm_single_2")
     out_dir.mkdir(parents=True, exist_ok=True)
     suffix = f"{cytokine}_grid{grid}_seed{seed}"
     idx = CYTOKINE_MAP[cytokine]
@@ -124,7 +123,6 @@ def run_pipeline(grid, seed, cytokine):
     n = len(X_all)
     t_end, v_end = int(0.7 * n), int(0.8 * n)
 
-    # optuna
     def objective(trial):
         tf.keras.backend.clear_session()
         f = trial.suggest_categorical("filters", [32, 64])
@@ -139,18 +137,15 @@ def run_pipeline(grid, seed, cytokine):
         loss = model.evaluate(X_all[t_end:v_end], Y_all[t_end:v_end], verbose=0)
         return loss
 
-    print(f"starting optimization (optuna) for {cytokine}")
+    print(f"starting optuna for {cytokine}")
     study = optuna.create_study(direction="minimize")
     study.optimize(objective, n_trials=5)
     
-    # final training
     best = study.best_params
     print(f"Best Params: {best}")
     
     final_model = STALSTMSingle(grid, filters=best["filters"], lstm_units=best["lstm_units"])
     final_model.compile(optimizer=tf.keras.optimizers.Adam(best["lr"]), loss="mse")
-    
-    print(f"training the final model")
     final_model.fit(X_all[:v_end], Y_all[:v_end], epochs=200, batch_size=4, verbose=1)
     
     Y_pred = final_model.predict(X_all, verbose=0)
@@ -167,7 +162,7 @@ def run_pipeline(grid, seed, cytokine):
         json.dump(res, f, indent=4)
         
     final_model.save_weights(out_dir / f"weights_{suffix}.weights.h5")
-    print(f"Results saved to results_{suffix}.json")
+    print(f"Success! Results saved to results_{suffix}.json")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
