@@ -262,7 +262,7 @@ def run_pinn(grid, seed, cytokine):
     study = optuna.create_study(direction="minimize")
     study.optimize(objective, n_trials=5) # 5 trials for speed
     best = study.best_params
-    print(f">>> Best PINN Params: {best}")
+    print(f"Best PINN Params: {best}")
 
     print("starting the run (15k epochs)...")
     tf.keras.backend.clear_session()
@@ -316,7 +316,7 @@ def run_pinn(grid, seed, cytokine):
         json.dump(res, f, indent=4)
         
     net.save_weights(str(out_dir / f"weights_{suffix}.weights.h5"))
-    print(f">>> Success! Saved to results_{suffix}.json")
+    print(f"Saved to results_{suffix}.json")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
