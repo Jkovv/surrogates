@@ -11,7 +11,6 @@ from scipy.stats import pearsonr
 from skimage.metrics import structural_similarity as ssim
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-
 CYTOKINE_MAP = {"il8": 0, "il1": 1, "il6": 2, "il10": 3, "tnf": 4, "tgf": 5}
 
 def set_seed(seed):
@@ -69,30 +68,24 @@ def compute_dice_coefficient(y_true, y_pred, smooth=1e-6):
     threshold = 0.05 
     y_true_bin = (y_true > threshold).astype(np.float32)
     y_pred_bin = (y_pred > threshold).astype(np.float32)
-    
     intersection = np.sum(y_true_bin * y_pred_bin)
     union = np.sum(y_true_bin) + np.sum(y_pred_bin)
     return (2. * intersection + smooth) / (union + smooth)
 
 def calculate_metrics(y_true, y_pred, masks):
     spatial_mask = np.max(masks, axis=-1, keepdims=True) 
-    
     sq_diff = np.square(y_true - y_pred) * spatial_mask
     m_rmse = np.sqrt(np.sum(sq_diff) / (np.sum(spatial_mask) + 1e-7))
-    
     r2 = r2_score(y_true.flatten(), y_pred.flatten())
     
     dices, corrs, ssim_vals = [], [], []
     for t in range(y_true.shape[0]):
         gt, pr = y_true[t,:,:,0], y_pred[t,:,:,0]
-        
         dices.append(compute_dice_coefficient(gt, pr))
-        
         drange = max(gt.max(), 1.0)
         win_size = min(7, gt.shape[0], gt.shape[1])
         if win_size % 2 == 0: win_size -= 1
         ssim_vals.append(ssim(gt, pr, data_range=drange, win_size=win_size))
-        
         if np.std(gt) > 1e-9 and np.std(pr) > 1e-9:
             corrs.append(pearsonr(gt.flatten(), pr.flatten())[0])
             
@@ -109,10 +102,10 @@ def run_pipeline(grid, seed, cytokine):
     data_path = Path(f"./preprocessed/{grid}x{grid}")
     out_dir = Path(f"./models/sta_lstm")
     out_dir.mkdir(parents=True, exist_ok=True)
+    
     suffix = f"{cytokine}_grid{grid}_seed{seed}"
     idx = CYTOKINE_MAP[cytokine]
 
-    # log scale data 
     X_all = np.load(data_path / "X_lstm.npy").astype(np.float32)[..., idx:idx+1]
     Y_all_scaled = np.load(data_path / "Y_target.npy").astype(np.float32)[..., idx:idx+1]
     M_all = np.load(data_path / "Y_masks.npy").astype(np.float32)
@@ -132,41 +125,51 @@ def run_pipeline(grid, seed, cytokine):
         
         model = STALSTMSingle(grid, filters=f, lstm_units=u)
         model.compile(optimizer=tf.keras.optimizers.Adam(lr), loss="mse")
-        
         model.fit(X_all[:t_end], Y_all_scaled[:t_end], epochs=20, batch_size=8, verbose=0)
         loss = model.evaluate(X_all[t_end:v_end], Y_all_scaled[t_end:v_end], verbose=0)
         return loss
 
-    print(f"starting Optuna for {cytokine}")
+    print(f"starting Optuna for {cytokine} (Seed: {seed})")
     study = optuna.create_study(direction="minimize")
     study.optimize(objective, n_trials=5)
     
     best = study.best_params
-    print(f"Best Params: {best}")
+    print(f"best params: {best}")
     
     final_model = STALSTMSingle(grid, filters=best["filters"], lstm_units=best["lstm_units"])
     final_model.compile(optimizer=tf.keras.optimizers.Adam(best["lr"]), loss="mse")
+    
+    print(f"training the final model")
     final_model.fit(X_all[:v_end], Y_all_scaled[:v_end], epochs=200, batch_size=4, verbose=1)
     
-    print(">>> Finalizing and applying Inverse Transform...")
     Y_pred_scaled = final_model.predict(X_all, verbose=0)
     
+    # log scale 
     Y_pred_phys = np.expm1(Y_pred_scaled * max_val_log)
     Y_all_phys = np.expm1(Y_all_scaled * max_val_log)
     
     res = {
-        "params": best, "seed": seed, "grid": grid, "cytokine": cytokine,
+        "params": best, 
+        "seed": seed, 
+        "grid": grid, 
+        "cytokine": cytokine,
         "results": {
             "Interpolation_72_89": calculate_metrics(Y_all_phys[70:88], Y_pred_phys[70:88], M_all[70:88]),
             "Extrapolation_82_100": calculate_metrics(Y_all_phys[80:99], Y_pred_phys[80:99], M_all[80:99])
         }
     }
     
-    with open(out_dir / f"results_{suffix}.json", 'w') as f:
+    json_path = out_dir / f"results_{suffix}.json"
+    weights_path = out_dir / f"weights_{suffix}.weights.h5"
+    
+    with open(json_path, 'w') as f:
         json.dump(res, f, indent=4)
         
-    final_model.save_weights(out_dir / f"weights_{suffix}.weights.h5")
-    print(f"Metrics saved to results_{suffix}.json")
+    final_model.save_weights(weights_path)
+    
+    print(f"\nFiles saved:")
+    print(f" - JSON: {json_path}")
+    print(f" - Weights: {weights_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
