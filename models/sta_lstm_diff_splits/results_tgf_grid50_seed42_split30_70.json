@@ -1,0 +1,20 @@
+{
+    "params": {
+        "filters": 64,
+        "lstm_units": 64,
+        "lr": 0.00022749487116436204
+    },
+    "seed": 42,
+    "grid": 50,
+    "cytokine": "tgf",
+    "split_ratio": 0.3,
+    "results": {
+        "Test_Set_Metrics": {
+            "Global_R2": -0.2564818859100342,
+            "Masked_RMSE": 1.1932834030214624e-07,
+            "Avg_Dice": 1.0,
+            "Avg_SSIM": 1.0,
+            "Spatial_Correlation": 0.031940340995788574
+        }
+    }
+}
