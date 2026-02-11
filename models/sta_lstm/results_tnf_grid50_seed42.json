@@ -1,0 +1,26 @@
+{
+    "params": {
+        "filters": 64,
+        "lstm_units": 128,
+        "lr": 0.001149231004079093
+    },
+    "seed": 42,
+    "grid": 50,
+    "cytokine": "tnf",
+    "results": {
+        "Interpolation_72_89": {
+            "Global_R2": -0.08412766456604004,
+            "Masked_RMSE": 6.048111209807251e-08,
+            "Avg_Dice": 1.0,
+            "Avg_SSIM": 1.0,
+            "Spatial_Correlation": 0.0
+        },
+        "Extrapolation_82_100": {
+            "Global_R2": -0.08683168888092041,
+            "Masked_RMSE": 6.657237823754e-08,
+            "Avg_Dice": 1.0,
+            "Avg_SSIM": 1.0,
+            "Spatial_Correlation": 0.0
+        }
+    }
+}

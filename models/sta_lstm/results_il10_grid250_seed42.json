@@ -1,0 +1,26 @@
+{
+    "params": {
+        "filters": 64,
+        "lstm_units": 64,
+        "lr": 0.0006348374662734954
+    },
+    "seed": 42,
+    "grid": 250,
+    "cytokine": "il10",
+    "results": {
+        "Interpolation_72_89": {
+            "Global_R2": -0.0006685256958007812,
+            "Masked_RMSE": 1.0213137663187595e-10,
+            "Avg_Dice": 1.0,
+            "Avg_SSIM": 1.0,
+            "Spatial_Correlation": 0.0
+        },
+        "Extrapolation_82_100": {
+            "Global_R2": -0.006504178047180176,
+            "Masked_RMSE": 8.663091950176238e-11,
+            "Avg_Dice": 1.0,
+            "Avg_SSIM": 1.0,
+            "Spatial_Correlation": 0.0
+        }
+    }
+}
