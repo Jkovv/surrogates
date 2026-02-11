@@ -102,7 +102,6 @@ def run_deeponet(grid, seed, cytokine):
     
     X_train_full, Y_train_full, dim_branch, Y_target_scaled, M_all, T_MAX, data_path = create_deeponet_data(grid, cytokine)
 
-    # optuna for 10% randomly selected points 
     sub_idx = np.random.choice(len(X_train_full), int(0.1 * len(X_train_full)), replace=False)
     data_sub = dde.data.DataSet(X_train=X_train_full[sub_idx], y_train=Y_train_full[sub_idx], 
                                 X_test=X_train_full[sub_idx], y_test=Y_train_full[sub_idx])
@@ -121,13 +120,12 @@ def run_deeponet(grid, seed, cytokine):
         model.train(iterations=1000, batch_size=2048, display_every=1000)
         return model.train_state.loss_train[0]
 
-    print("optuna run -> subsampled 10%:")
+    print("optuna (for subsampled 10%):")
     study = optuna.create_study(direction="minimize")
     study.optimize(objective, n_trials=5)
     best = study.best_params
-    print(f">>> Best Params: {best}")
+    print(f"Best Params: {best}")
 
-    # full run 
     tf.keras.backend.clear_session()
     
     width, depth = best['neurons'], best['layers']
@@ -144,7 +142,7 @@ def run_deeponet(grid, seed, cytokine):
     
     ckpt_cb = dde.callbacks.ModelCheckpoint(str(out_dir / f"model_{suffix}.ckpt"), save_better_only=True, period=1000)
     
-    print(f">>> Starting Hero Run (15k steps) on FULL data...")
+    print(f"full run:")
     model.train(iterations=15000, batch_size=10240, display_every=500, callbacks=[ckpt_cb])
     
     with open(data_path / "scaling_params.json", "r") as f:
@@ -153,7 +151,7 @@ def run_deeponet(grid, seed, cytokine):
 
     y_pred_scaled = model.predict(X_train_full).reshape(T_MAX + 1, grid, grid, 1)
     
-    # exp(y*max)-1
+    # exp(y * max) - 1
     y_pred_phys = np.expm1(y_pred_scaled * max_val_log)
     y_true_phys = np.expm1(Y_target_scaled * max_val_log)
 
@@ -172,7 +170,7 @@ def run_deeponet(grid, seed, cytokine):
         json.dump(res, f, indent=4)
         
     net.save_weights(str(out_dir / f"weights_{suffix}.weights.h5"))
-    print(f">>> DONE. Saved results_{suffix}.json with physical metrics.")
+    print(f"Saved results_{suffix}.json with physical metrics.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
