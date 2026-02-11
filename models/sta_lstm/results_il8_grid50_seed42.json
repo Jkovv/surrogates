@@ -1,0 +1,26 @@
+{
+    "params": {
+        "filters": 64,
+        "lstm_units": 64,
+        "lr": 0.0001778352617665232
+    },
+    "seed": 42,
+    "grid": 50,
+    "cytokine": "il8",
+    "results": {
+        "Interpolation_72_89": {
+            "Global_R2": 0.9462639689445496,
+            "Masked_RMSE": 1.6299010071546066e-06,
+            "Avg_Dice": 1.0,
+            "Avg_SSIM": 0.9999999999264519,
+            "Spatial_Correlation": 0.9732415080070496
+        },
+        "Extrapolation_82_100": {
+            "Global_R2": 0.9456207156181335,
+            "Masked_RMSE": 1.8268717039058746e-06,
+            "Avg_Dice": 1.0,
+            "Avg_SSIM": 0.999999999701847,
+            "Spatial_Correlation": 0.974770188331604
+        }
+    }
+}
