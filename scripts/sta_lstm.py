@@ -36,7 +36,6 @@ class STALSTMSingle(tf.keras.Model):
     def __init__(self, grid_size, filters=64, lstm_units=64):
         super().__init__()
         self.grid_size = grid_size
-        
         self.base_dim = grid_size // 4
         
         # ENCODER
@@ -55,10 +54,8 @@ class STALSTMSingle(tf.keras.Model):
         self.decoder = tf.keras.Sequential([
             tf.keras.layers.Dense(self.base_dim * self.base_dim * filters, activation='relu'),
             tf.keras.layers.Reshape((self.base_dim, self.base_dim, filters)),
-            
             tf.keras.layers.Conv2DTranspose(filters // 2, 3, strides=2, padding='same', activation='relu'),
             tf.keras.layers.Conv2DTranspose(filters // 4, 3, strides=2, padding='same', activation='relu'),
-            
             tf.keras.layers.Conv2D(1, 3, padding='same', activation='sigmoid'),
             tf.keras.layers.Resizing(grid_size, grid_size)
         ])
@@ -67,7 +64,6 @@ class STALSTMSingle(tf.keras.Model):
         x = self.encoder(inputs)
         x = self.lstm(x)
         return self.decoder(x)
-        
 
 def compute_dice_coefficient(y_true, y_pred, smooth=1e-6):
     threshold = 0.05 
@@ -111,14 +107,19 @@ def calculate_metrics(y_true, y_pred, masks):
 def run_pipeline(grid, seed, cytokine):
     set_seed(seed)
     data_path = Path(f"./preprocessed/{grid}x{grid}")
-    out_dir = Path(f"./models/sta_lstm_single_2")
+    out_dir = Path(f"./models/sta_lstm")
     out_dir.mkdir(parents=True, exist_ok=True)
     suffix = f"{cytokine}_grid{grid}_seed{seed}"
     idx = CYTOKINE_MAP[cytokine]
 
+    # log scale data 
     X_all = np.load(data_path / "X_lstm.npy").astype(np.float32)[..., idx:idx+1]
-    Y_all = np.load(data_path / "Y_target.npy").astype(np.float32)[..., idx:idx+1]
+    Y_all_scaled = np.load(data_path / "Y_target.npy").astype(np.float32)[..., idx:idx+1]
     M_all = np.load(data_path / "Y_masks.npy").astype(np.float32)
+
+    with open(data_path / "scaling_params.json", "r") as f:
+        scaling_params = json.load(f)
+    max_val_log = scaling_params[cytokine]
 
     n = len(X_all)
     t_end, v_end = int(0.7 * n), int(0.8 * n)
@@ -132,12 +133,11 @@ def run_pipeline(grid, seed, cytokine):
         model = STALSTMSingle(grid, filters=f, lstm_units=u)
         model.compile(optimizer=tf.keras.optimizers.Adam(lr), loss="mse")
         
-        model.fit(X_all[:t_end], Y_all[:t_end], epochs=20, batch_size=8, verbose=0)
-        
-        loss = model.evaluate(X_all[t_end:v_end], Y_all[t_end:v_end], verbose=0)
+        model.fit(X_all[:t_end], Y_all_scaled[:t_end], epochs=20, batch_size=8, verbose=0)
+        loss = model.evaluate(X_all[t_end:v_end], Y_all_scaled[t_end:v_end], verbose=0)
         return loss
 
-    print(f"starting optuna for {cytokine}")
+    print(f"starting Optuna for {cytokine}")
     study = optuna.create_study(direction="minimize")
     study.optimize(objective, n_trials=5)
     
@@ -146,15 +146,19 @@ def run_pipeline(grid, seed, cytokine):
     
     final_model = STALSTMSingle(grid, filters=best["filters"], lstm_units=best["lstm_units"])
     final_model.compile(optimizer=tf.keras.optimizers.Adam(best["lr"]), loss="mse")
-    final_model.fit(X_all[:v_end], Y_all[:v_end], epochs=200, batch_size=4, verbose=1)
+    final_model.fit(X_all[:v_end], Y_all_scaled[:v_end], epochs=200, batch_size=4, verbose=1)
     
-    Y_pred = final_model.predict(X_all, verbose=0)
+    print(">>> Finalizing and applying Inverse Transform...")
+    Y_pred_scaled = final_model.predict(X_all, verbose=0)
+    
+    Y_pred_phys = np.expm1(Y_pred_scaled * max_val_log)
+    Y_all_phys = np.expm1(Y_all_scaled * max_val_log)
     
     res = {
         "params": best, "seed": seed, "grid": grid, "cytokine": cytokine,
         "results": {
-            "Interpolation_72_89": calculate_metrics(Y_all[70:88], Y_pred[70:88], M_all[70:88]),
-            "Extrapolation_82_100": calculate_metrics(Y_all[80:99], Y_pred[80:99], M_all[80:99])
+            "Interpolation_72_89": calculate_metrics(Y_all_phys[70:88], Y_pred_phys[70:88], M_all[70:88]),
+            "Extrapolation_82_100": calculate_metrics(Y_all_phys[80:99], Y_pred_phys[80:99], M_all[80:99])
         }
     }
     
@@ -162,7 +166,7 @@ def run_pipeline(grid, seed, cytokine):
         json.dump(res, f, indent=4)
         
     final_model.save_weights(out_dir / f"weights_{suffix}.weights.h5")
-    print(f"Success! Results saved to results_{suffix}.json")
+    print(f"Metrics saved to results_{suffix}.json")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
