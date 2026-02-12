@@ -4,7 +4,6 @@ import argparse
 import random
 import numpy as np
 import tensorflow as tf
-import deepxde as dde
 import optuna
 from pathlib import Path
 from sklearn.metrics import r2_score
@@ -13,164 +12,169 @@ from skimage.metrics import structural_similarity as ssim
 import warnings
 
 warnings.filterwarnings("ignore")
-tf.keras.backend.set_floatx('float32')
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-
-CYTOKINE_MAP = {"il8": 0, "il1": 1, "il6": 2, "il10": 3, "tnf": 4, "tgf": 5}
 
 def set_seed(seed):
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    tf.random.set_seed(seed)
-    os.environ['TF_DETERMINISTIC_OPS'] = '1'
+    s = int(seed)
+    os.environ['PYTHONHASHSEED'] = str(s)
+    random.seed(s)
+    np.random.seed(s)
+    tf.random.set_seed(s)
 
-def compute_dice_coefficient(y_true, y_pred, smooth=1e-6):
-    threshold = 0.05 
-    y_true_bin = (y_true > threshold).astype(np.float32)
-    y_pred_bin = (y_pred > threshold).astype(np.float32)
-    intersection = np.sum(y_true_bin * y_pred_bin)
-    union = np.sum(y_true_bin) + np.sum(y_pred_bin)
-    return (2. * intersection + smooth) / (union + smooth)
+def positional_encoding(coords, L=6):
+    """Fourier Features dla Trunka - klucz do detali przestrzennych"""
+    out = [coords]
+    for i in range(L):
+        for fn in [tf.sin, tf.cos]:
+            out.append(fn(2.0**i * np.pi * coords))
+    return tf.concat(out, axis=-1)
+
+def build_conv_deeponet(grid_size, n_features, n_filters, p_dim, L):
+    init = tf.keras.initializers.HeNormal()
+
+    # BRANCH NET 
+    branch_in = tf.keras.layers.Input(shape=(grid_size, grid_size, n_features))
+    b = tf.keras.layers.Conv2D(n_filters, 3, padding='same')(branch_in)
+    b = tf.keras.layers.LeakyReLU(0.2)(b)
+    b = tf.keras.layers.MaxPooling2D(2)(b)
+    b = tf.keras.layers.Conv2D(n_filters * 2, 3, padding='same')(b)
+    b = tf.keras.layers.LeakyReLU(0.2)(b)
+    b = tf.keras.layers.Flatten()(b)
+    branch_out = tf.keras.layers.Dense(p_dim, activation='tanh')(b)
+
+    # TRUNK NET 
+    trunk_raw = tf.keras.layers.Input(shape=(3,))
+    t_encoded = tf.keras.layers.Lambda(lambda x: positional_encoding(x, L=L))(trunk_raw)
+    t = tf.keras.layers.Dense(256)(t_encoded)
+    t = tf.keras.layers.LeakyReLU(0.2)(t)
+    t = tf.keras.layers.LayerNormalization()(t)
+    t = tf.keras.layers.Dense(256)(t)
+    t = tf.keras.layers.LeakyReLU(0.2)(t)
+    trunk_out = tf.keras.layers.Dense(p_dim, activation='tanh')(t)
+
+    combined = tf.keras.layers.Multiply()([branch_out, trunk_out])
+    
+    output = tf.keras.layers.Dense(1, activation='softplus',
+                                   bias_initializer=tf.keras.initializers.Constant(0.01))(combined)
+    
+    return tf.keras.Model(inputs=[branch_in, trunk_raw], outputs=output)
 
 def calculate_metrics(y_true, y_pred, masks):
-    if y_true.ndim == 4: y_true = y_true[..., 0]
-    if y_pred.ndim == 4: y_pred = y_pred[..., 0]
+    yt, yp = y_true.flatten(), y_pred.flatten()
+    r2 = r2_score(yt, yp)
     
-    r2 = r2_score(y_true.flatten(), y_pred.flatten())
+    # Masked RMSE
     spatial_mask = np.max(masks, axis=-1).squeeze()
-    sq_diff = np.square(y_true - y_pred) * spatial_mask
-    m_rmse = np.sqrt(np.sum(sq_diff) / (np.sum(spatial_mask) + 1e-7))
+    denom = np.sum(spatial_mask) + 1e-7
+    rmse = np.sqrt(np.sum(np.square(y_true - y_pred) * spatial_mask) / denom)
     
-    dices, corrs, ssim_vals = [], [], []
-    for t in range(y_true.shape[0]):
-        gt, pr = y_true[t], y_pred[t]
-        dices.append(compute_dice_coefficient(gt, pr))
-        drange = max(gt.max(), 1.0)
-        win_size = min(7, gt.shape[0], gt.shape[1])
-        if win_size % 2 == 0: win_size -= 1
-        ssim_vals.append(ssim(gt, pr, data_range=drange, win_size=win_size))
-        if np.std(gt) > 1e-9 and np.std(pr) > 1e-9:
-            corrs.append(pearsonr(gt.flatten(), pr.flatten())[0])
-            
+    # Spatial Correlation
+    if np.std(yp) > 1e-9:
+        pearson, _ = pearsonr(yt, yp)
+    else:
+        pearson = 0.0
+    
+    # DICE
+    thresh = 0.01 
+    y_t_b, y_p_b = (y_true > thresh), (y_pred > thresh)
+    dice = (2. * np.sum(y_t_b * y_p_b)) / (np.sum(y_t_b) + np.sum(y_p_b) + 1e-7)
+
+    # SSIM 
+    ssim_list = []
+    for i in range(len(y_true)):
+        dr = max(y_true[i].max(), 1.0)
+        ssim_list.append(ssim(y_true[i], y_pred[i], data_range=dr))
+    
     return {
-        "Global_R2": float(r2), 
-        "Masked_RMSE": float(m_rmse),
-        "Avg_Dice": float(np.mean(dices)),
-        "Avg_SSIM": float(np.mean(ssim_vals)),
-        "Spatial_Correlation": float(np.mean(corrs)) if corrs else 0.0
+        "Global_R2": float(r2),
+        "Masked_RMSE": float(rmse),
+        "Avg_Dice": float(dice),
+        "Avg_SSIM": float(np.mean(ssim_list)),
+        "Spatial_Correlation": float(pearson)
     }
 
-def create_deeponet_data(grid, cytokine):
-    base_dir = Path(".")
-    data_path = base_dir / f"preprocessed/{grid}x{grid}"
-    Y_all_scaled = np.load(data_path / "Y_target.npy").astype(np.float32)
-    M_all = np.load(data_path / "Y_masks.npy").astype(np.float32)
-    idx = CYTOKINE_MAP[cytokine]
-    Y_target_scaled = Y_all_scaled[..., idx:idx+1]
-    T_MAX = Y_target_scaled.shape[0] - 1
-    u_0 = Y_target_scaled[0].flatten()
-    dim_branch = len(u_0)
-    
-    x_coords = np.linspace(0, 1, grid)
-    y_coords = np.linspace(0, 1, grid)
-    t_coords = np.linspace(0, 1, T_MAX + 1)
-    X, Y, T = np.meshgrid(x_coords, y_coords, t_coords, indexing='ij')
-    X_trunk = np.stack([X.flatten(), Y.flatten(), T.flatten()], axis=-1)
-    
-    N_points = X_trunk.shape[0]
-    X_branch_tiled = np.tile(u_0, (N_points, 1))
-    X_train = np.hstack([X_branch_tiled, X_trunk])
-    Y_train_scaled = np.expand_dims(Y_target_scaled.flatten(), axis=-1)
-    
-    return X_train, Y_train_scaled, dim_branch, Y_target_scaled, M_all, T_MAX, data_path
-
-class SingleInputDeepONet(dde.maps.DeepONet):
-    def __init__(self, layer_sizes_branch, layer_sizes_trunk, activation, kernel_initializer, split_idx):
-        super().__init__(layer_sizes_branch, layer_sizes_trunk, activation, kernel_initializer)
-        self.split_idx = split_idx
-    def call(self, inputs, training=False):
-        x_branch = inputs[:, :self.split_idx]
-        x_trunk = inputs[:, self.split_idx:]
-        return super().call((x_branch, x_trunk), training=training)
-
-def run_deeponet(grid, seed, cytokine):
+def run_experiment(grid, cytokine, seed):
     set_seed(seed)
-    base_dir = Path(".")
-    out_dir = base_dir / "models/deeponet"
+    data_path = Path(f"./preprocessed/{grid}x{grid}")
+    out_dir = Path("./models/deeponet")
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    X_b = np.load(data_path / "X_branch.npy")
+    X_t = np.load(data_path / "X_trunk.npy")
+    Y_all = np.load(data_path / "Y_target.npy")
+    M_all = np.load(data_path / "Y_masks.npy")
     
-    X_train_full, Y_train_full, dim_branch, Y_target_scaled, M_all, T_MAX, data_path = create_deeponet_data(grid, cytokine)
+    idx = {"il8": 0, "il1": 1, "il6": 2, "il10": 3, "tnf": 4, "tgf": 5}[cytokine]
+    n_samples = X_b.shape[0]
+    train_idx, val_idx = int(0.7 * n_samples), int(0.8 * n_samples)
+    bs = 256 
 
-    sub_idx = np.random.choice(len(X_train_full), int(0.1 * len(X_train_full)), replace=False)
-    data_sub = dde.data.DataSet(X_train=X_train_full[sub_idx], y_train=Y_train_full[sub_idx], 
-                                X_test=X_train_full[sub_idx], y_test=Y_train_full[sub_idx])
+    def make_dataset(start, end):
+        def gen():
+            for i in range(start, end):
+                b_tile = np.tile(X_b[i:i+1], (grid*grid, 1, 1, 1))
+                yield (b_tile, X_t[i]), Y_all[i, ..., idx].flatten()[:, np.newaxis]
+        return tf.data.Dataset.from_generator(
+            gen, output_signature=((tf.TensorSpec(shape=(grid*grid, grid, grid, X_b.shape[-1]), dtype=tf.float32),
+                                    tf.TensorSpec(shape=(grid*grid, 3), dtype=tf.float32)),
+                                   tf.TensorSpec(shape=(grid*grid, 1), dtype=tf.float32))
+        ).unbatch().batch(bs).prefetch(tf.data.AUTOTUNE)
 
+    train_ds, val_ds = make_dataset(0, train_idx), make_dataset(train_idx, val_idx)
+
+    # optuna
     def objective(trial):
         tf.keras.backend.clear_session()
-        lr = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
-        width = trial.suggest_categorical("neurons", [64, 128])
-        depth = trial.suggest_int("layers", 2, 4)
-        
-        net = SingleInputDeepONet([dim_branch] + [width] * depth + [64], [3] + [width] * depth + [64], 
-                                  "relu", "Glorot uniform", split_idx=dim_branch)
-        net.apply_output_transform(lambda x, y: tf.nn.softplus(y))
-        model = dde.Model(data_sub, net)
-        model.compile("adam", lr=lr)
-        model.train(iterations=1000, batch_size=2048, display_every=1000)
-        return model.train_state.loss_train[0]
+        params = {
+            "lr": trial.suggest_float("lr", 1e-4, 4e-3, log=True),
+            "p_dim": trial.suggest_categorical("p_dim", [128, 256]),
+            "n_filters": trial.suggest_categorical("n_filters", [32, 64]),
+            "L": trial.suggest_int("L", 4, 8)
+        }
+        model = build_conv_deeponet(grid, X_b.shape[-1], params['n_filters'], params['p_dim'], params['L'])
+        model.compile(optimizer=tf.keras.optimizers.Adam(params['lr']), loss='mse')
+        model.fit(train_ds.take(100), epochs=5, verbose=0)
+        return model.evaluate(val_ds.take(50), verbose=0)
 
-    print("optuna (for subsampled 10%):")
     study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=5)
+    study.optimize(objective, n_trials=15)
     best = study.best_params
-    print(f"Best Params: {best}")
 
-    tf.keras.backend.clear_session()
+    # training
+    model = build_conv_deeponet(grid, X_b.shape[-1], best['n_filters'], best['p_dim'], best['L'])
+    model.compile(optimizer=tf.keras.optimizers.Adam(best['lr']), loss='mse')
     
-    width, depth = best['neurons'], best['layers']
-    suffix = f"{cytokine}_grid{grid}_seed{seed}_arch{width}x{depth}"
+    callbacks = [
+        tf.keras.callbacks.EarlyStopping(patience=15, restore_best_weights=True),
+        tf.keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=7)
+    ]
+    model.fit(train_ds, validation_data=val_ds, epochs=100, callbacks=callbacks)
     
-    net = SingleInputDeepONet([dim_branch] + [width] * depth + [64], 
-                              [3] + [width] * depth + [64], 
-                              "relu", "Glorot uniform", split_idx=dim_branch)
-    net.apply_output_transform(lambda x, y: tf.nn.softplus(y))
-    
-    data_full = dde.data.DataSet(X_train=X_train_full, y_train=Y_train_full, X_test=X_train_full, y_test=Y_train_full)
-    model = dde.Model(data_full, net)
-    model.compile("adam", lr=best['lr'])
-    
-    ckpt_cb = dde.callbacks.ModelCheckpoint(str(out_dir / f"model_{suffix}.ckpt"), save_better_only=True, period=1000)
-    
-    print(f"full run:")
-    model.train(iterations=15000, batch_size=10240, display_every=500, callbacks=[ckpt_cb])
-    
-    with open(data_path / "scaling_params.json", "r") as f:
-        scaling_params = json.load(f)
-    max_val_log = scaling_params[cytokine]
-
-    y_pred_scaled = model.predict(X_train_full).reshape(T_MAX + 1, grid, grid, 1)
-    
-    # exp(y * max) - 1
-    y_pred_phys = np.expm1(y_pred_scaled * max_val_log)
-    y_true_phys = np.expm1(Y_target_scaled * max_val_log)
+    preds = []
+    for i in range(n_samples):
+        p = model.predict([np.tile(X_b[i:i+1], (grid*grid, 1, 1, 1)), X_t[i]], verbose=0)
+        preds.append(p.reshape(grid, grid))
+    preds = np.array(preds)
 
     res = {
-        "params": best, 
+        "params": {
+            "filters": best['n_filters'],
+            "p_dim": best['p_dim'],
+            "L": best['L'],
+            "lr": best['lr']
+        },
         "seed": seed,
         "grid": grid,
         "cytokine": cytokine,
-        "metrics": {
-            "Interpolation_72_89": calculate_metrics(y_true_phys[72:89], y_pred_phys[72:89], M_all[72:89]),
-            "Extrapolation_82_100": calculate_metrics(y_true_phys[82:100], y_pred_phys[82:100], M_all[82:100])
+        "results": {
+            "Interpolation_72_89": calculate_metrics(Y_all[70:87, ..., idx], preds[70:87], M_all[70:87]),
+            "Extrapolation_82_100": calculate_metrics(Y_all[80:98, ..., idx], preds[80:98], M_all[80:98])
         }
     }
     
-    with open(out_dir / f"results_{suffix}.json", 'w') as f:
-        json.dump(res, f, indent=4)
-        
-    net.save_weights(str(out_dir / f"weights_{suffix}.weights.h5"))
-    print(f"Saved results_{suffix}.json with physical metrics.")
+    suffix = f"results_deeponet_{cytokine}_{grid}_s{seed}"
+    model.save_weights(out_dir / f"weights_{suffix}.weights.h5")
+    with open(out_dir / f"{suffix}.json", 'w') as f: json.dump(res, f, indent=4)
+    print(f">>> DeepONet experiment finished. Results unified with STA-LSTM structure.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -178,4 +182,4 @@ if __name__ == "__main__":
     parser.add_argument("--cytokine", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
-    run_deeponet(args.grid, args.seed, args.cytokine.lower())
+    run_experiment(args.grid, args.cytokine.lower(), args.seed)
