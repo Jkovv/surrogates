@@ -21,7 +21,6 @@ def set_seed(seed):
     tf.random.set_seed(s)
 
 def positional_encoding(coords, L=6):
-    """Fourier Features dla Trunka - klucz do detali przestrzennych"""
     out = [coords]
     for i in range(L):
         for fn in [tf.sin, tf.cos]:
@@ -31,7 +30,7 @@ def positional_encoding(coords, L=6):
 def build_conv_deeponet(grid_size, n_features, n_filters, p_dim, L):
     init = tf.keras.initializers.HeNormal()
 
-    # BRANCH NET 
+    # BRANCH NET
     branch_in = tf.keras.layers.Input(shape=(grid_size, grid_size, n_features))
     b = tf.keras.layers.Conv2D(n_filters, 3, padding='same')(branch_in)
     b = tf.keras.layers.LeakyReLU(0.2)(b)
@@ -41,7 +40,7 @@ def build_conv_deeponet(grid_size, n_features, n_filters, p_dim, L):
     b = tf.keras.layers.Flatten()(b)
     branch_out = tf.keras.layers.Dense(p_dim, activation='tanh')(b)
 
-    # TRUNK NET 
+    # TRUNK NET
     trunk_raw = tf.keras.layers.Input(shape=(3,))
     t_encoded = tf.keras.layers.Lambda(lambda x: positional_encoding(x, L=L))(trunk_raw)
     t = tf.keras.layers.Dense(256)(t_encoded)
@@ -78,7 +77,7 @@ def calculate_metrics(y_true, y_pred, masks):
     y_t_b, y_p_b = (y_true > thresh), (y_pred > thresh)
     dice = (2. * np.sum(y_t_b * y_p_b)) / (np.sum(y_t_b) + np.sum(y_p_b) + 1e-7)
 
-    # SSIM 
+    # SSIM
     ssim_list = []
     for i in range(len(y_true)):
         dr = max(y_true[i].max(), 1.0)
@@ -121,7 +120,6 @@ def run_experiment(grid, cytokine, seed):
 
     train_ds, val_ds = make_dataset(0, train_idx), make_dataset(train_idx, val_idx)
 
-    # optuna
     def objective(trial):
         tf.keras.backend.clear_session()
         params = {
@@ -139,7 +137,6 @@ def run_experiment(grid, cytokine, seed):
     study.optimize(objective, n_trials=15)
     best = study.best_params
 
-    # training
     model = build_conv_deeponet(grid, X_b.shape[-1], best['n_filters'], best['p_dim'], best['L'])
     model.compile(optimizer=tf.keras.optimizers.Adam(best['lr']), loss='mse')
     
