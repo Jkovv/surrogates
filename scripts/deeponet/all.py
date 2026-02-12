@@ -40,7 +40,7 @@ def build_conv_deeponet(grid_size, n_features, n_filters, p_dim, L):
     b = tf.keras.layers.Flatten()(b)
     branch_out = tf.keras.layers.Dense(p_dim, activation='tanh')(b)
 
-    # TRUNK NET
+    # TRUNK NET 
     trunk_raw = tf.keras.layers.Input(shape=(3,))
     t_encoded = tf.keras.layers.Lambda(lambda x: positional_encoding(x, L=L))(trunk_raw)
     t = tf.keras.layers.Dense(256)(t_encoded)
@@ -77,7 +77,7 @@ def calculate_metrics(y_true, y_pred, masks):
     y_t_b, y_p_b = (y_true > thresh), (y_pred > thresh)
     dice = (2. * np.sum(y_t_b * y_p_b)) / (np.sum(y_t_b) + np.sum(y_p_b) + 1e-7)
 
-    # SSIM 
+    # SSIM
     ssim_list = []
     for i in range(len(y_true)):
         dr = max(y_true[i].max(), 1.0)
