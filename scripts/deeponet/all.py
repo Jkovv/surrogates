@@ -30,7 +30,7 @@ def positional_encoding(coords, L=6):
 def build_conv_deeponet(grid_size, n_features, n_filters, p_dim, L):
     init = tf.keras.initializers.HeNormal()
 
-    # BRANCH NET
+    # BRANCH NET 
     branch_in = tf.keras.layers.Input(shape=(grid_size, grid_size, n_features))
     b = tf.keras.layers.Conv2D(n_filters, 3, padding='same')(branch_in)
     b = tf.keras.layers.LeakyReLU(0.2)(b)
@@ -77,7 +77,7 @@ def calculate_metrics(y_true, y_pred, masks):
     y_t_b, y_p_b = (y_true > thresh), (y_pred > thresh)
     dice = (2. * np.sum(y_t_b * y_p_b)) / (np.sum(y_t_b) + np.sum(y_p_b) + 1e-7)
 
-    # SSIM
+    # SSIM 
     ssim_list = []
     for i in range(len(y_true)):
         dr = max(y_true[i].max(), 1.0)
