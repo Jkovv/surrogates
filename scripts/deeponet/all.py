@@ -171,7 +171,6 @@ def run_experiment(grid, cytokine, seed):
     suffix = f"results_deeponet_{cytokine}_{grid}_s{seed}"
     model.save_weights(out_dir / f"weights_{suffix}.weights.h5")
     with open(out_dir / f"{suffix}.json", 'w') as f: json.dump(res, f, indent=4)
-    print(f">>> DeepONet experiment finished. Results unified with STA-LSTM structure.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -180,3 +179,4 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     run_experiment(args.grid, args.cytokine.lower(), args.seed)
+
