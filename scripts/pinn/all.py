@@ -4,23 +4,15 @@ import argparse
 import random
 import numpy as np
 import tensorflow as tf
-import optuna
-import gc
-import time
 from pathlib import Path
 from sklearn.metrics import r2_score
 from scipy.stats import pearsonr
 from skimage.metrics import structural_similarity as ssim
 import warnings
 
-# for now 
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices=false'
-os.environ['XLA_FLAGS'] = '--xla_gpu_force_compilation_parallelism=1'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
 warnings.filterwarnings("ignore")
-
-import deepxde as dde
-dde.config.disable_xla_jit() # for now 
 
 CYTOKINE_MAP = {"il8": 0, "il1": 1, "il6": 2, "il10": 3, "tnf": 4, "tgf": 5}
 
@@ -29,136 +21,144 @@ def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     tf.random.set_seed(seed)
-    dde.config.set_random_seed(seed)
 
-def get_pde_params():
-    D = np.array([2.09e-6, 3e-7, 8.49e-8, 1.45e-8, 4.07e-9, 2.6e-7])
-    K = np.array([0.2, 0.6, 0.5, 0.5, 0.11, 0.02])
-    return tf.constant(D, dtype=tf.float32), tf.constant(K, dtype=tf.float32)
+class PINN(tf.keras.Model):
+    def __init__(self, layers=[128, 128, 128, 128]):
+        super().__init__()
+        # FNN
+        self.fcs = [tf.keras.layers.Dense(l, activation='swish', kernel_initializer='glorot_normal') for l in layers]
+        self.out_layer = tf.keras.layers.Dense(1, activation='linear')
 
-def wound_pde(x, y, D_tf, k_tf):
-    u_list = [y[:, i:i+1] for i in range(6)]
-    res = []
-    for i in range(6):
-        du_t = dde.grad.jacobian(y, x, i=i, j=2)
-        du_xx = dde.grad.hessian(y, x, component=i, i=0, j=0)
-        du_yy = dde.grad.hessian(y, x, component=i, i=1, j=1)
-        res.append(du_t - (D_tf[i] * (du_xx + du_yy) - k_tf[i] * u_list[i]))
-    return tf.concat(res, axis=1)
+    def call(self, inputs):
+        x = inputs
+        for layer in self.fcs:
+            x = layer(x)
+        return self.out_layer(x)
 
-def calculate_metrics_masked(y_true, y_pred, masks, grid):
-    yt, yp = y_true.flatten(), y_pred.flatten()
-    mask = np.max(masks, axis=-1).flatten()
+def calculate_metrics_phys(y_true, y_pred, masks, grid_size):
+    spatial_mask = np.max(masks, axis=-1, keepdims=True) 
     
-    yt_m, yp_m = yt[mask > 0], yp[mask > 0]
-    if len(yt_m) == 0: 
-        return {"Global_R2": 0.0, "Masked_RMSE": 0.0, "Avg_SSIM": 0.0}
-
-    r2 = r2_score(yt_m, yp_m)
-    rmse = np.sqrt(np.mean(np.square(yt_m - yp_m)))
+    y_true_f = y_true.flatten()
+    y_pred_f = y_pred.flatten()
     
-    y_t_sq = y_true.reshape(-1, grid, grid)
-    y_p_sq = y_pred.reshape(-1, grid, grid)
-    ssim_v = np.mean([ssim(y_t_sq[i], y_p_sq[i], data_range=max(y_t_sq[i].max(), 1.0)) for i in range(len(y_t_sq))])
+    r2 = r2_score(y_true_f, y_pred_f)
     
-    return {"Global_R2": float(r2), "Masked_RMSE": float(rmse), "Avg_SSIM": float(ssim_v)}
+    # Masked RMSE
+    sq_diff = np.square(y_true - y_pred) * spatial_mask
+    m_rmse = np.sqrt(np.sum(sq_diff) / (np.sum(spatial_mask) + 1e-7))
 
-def build_pinn_model(grid, cytokine, lr, D_tf, k_tf, X_train, Y_train):
-    geom = dde.geometry.Rectangle([0, 0], [1, 1])
-    timedomain = dde.geometry.TimeDomain(0, 1)
-    geomtime = dde.geometry.GeometryXTime(geom, timedomain)
+    corrs, ssim_vals = [], []
+    for t in range(y_true.shape[0]):
+        gt, pr = y_true[t, :, :, 0], y_pred[t, :, :, 0]
+        # SSIM
+        ssim_vals.append(ssim(gt, pr, data_range=max(gt.max(), 1.0)))
+        # corr
+        if np.std(gt) > 1e-9 and np.std(pr) > 1e-9:
+            corrs.append(pearsonr(gt.flatten(), pr.flatten())[0])
 
-    obs = dde.icbc.PointSetBC(X_train, Y_train, component=CYTOKINE_MAP[cytokine])
+    return {
+        "Global_R2": float(r2),
+        "Masked_RMSE": float(m_rmse),
+        "Avg_SSIM": float(np.mean(ssim_vals)),
+        "Spatial_Correlation": float(np.mean(corrs)) if corrs else 0.0
+    }
 
-    data = dde.data.TimePDE(
-        geomtime, 
-        lambda x, y: wound_pde(x, y, D_tf, k_tf),
-        [obs],
-        num_domain=5000, 
-        num_boundary=1000,
-        anchors=X_train
-    )
-
-    net = dde.maps.FNN([3] + [128] * 4 + [6], "tanh", "Glorot uniform")
-    net.apply_output_transform(lambda x, y: tf.nn.softplus(y))
+def run_pinn_experiment(grid, cytokine, seed):
+    set_seed(seed)
+    cyto = cytokine.lower()
+    data_path = Path(f"./preprocessed/{grid}x{grid}")
+    out_dir = Path("./models/pinn")
+    out_dir.mkdir(parents=True, exist_ok=True)
     
-    model = dde.Model(data, net)
-    model.compile("adam", lr=lr)
-    return model
+    suffix = f"pinn_{cyto}_grid{grid}_seed{seed}"
+    
+    X_coords = np.load(data_path / "X_trunk.npy").astype(np.float32) # [Samples, Grid*Grid, 3]
+    Y_all_scaled = np.load(data_path / "Y_target.npy").astype(np.float32) # [Samples, Grid, Grid, 6]
+    M_all = np.load(data_path / "Y_masks.npy").astype(np.float32)
 
-def run_pinn_full():
+    with open(data_path / "scaling_params.json", "r") as f:
+        scaling_params = json.load(f)
+    max_val_log = tf.constant(scaling_params[cyto], dtype=tf.float32)
+
+    idx = CYTOKINE_MAP[cyto]
+    Y_target_cyto = Y_all_scaled[..., idx:idx+1] # [Samples, Grid, Grid, 1]
+
+    # 70/10/20
+    n_samples = len(X_coords)
+    train_end = int(0.7 * n_samples)
+    val_end = int(0.8 * n_samples)
+
+    X_train = X_coords[:train_end].reshape(-1, 3)
+    Y_train = Y_target_cyto[:train_end].reshape(-1, 1)
+
+    model = PINN()
+    optimizer = tf.keras.optimizers.Adam(1e-3)
+
+    @tf.function
+    def train_step(x_batch, y_batch):
+        with tf.GradientTape(persistent=True) as tape:
+            tape.watch(x_batch)
+            y_pred = model(x_batch) 
+            
+            loss_data = tf.reduce_mean(tf.square(y_batch - y_pred))
+            
+            u_phys = tf.exp(y_pred * max_val_log) - 1.0
+            
+            grads = tape.gradient(u_phys, x_batch)
+            u_t = grads[:, 2:3]
+            
+            loss_phys = tf.reduce_mean(tf.square(u_t)) # d_u/dt = 0
+            
+            total_loss = loss_data + 1e-4 * loss_phys
+            
+        grads_model = tape.gradient(total_loss, model.trainable_variables)
+        optimizer.apply_gradients(zip(grads_model, model.trainable_variables))
+        return total_loss, loss_data
+
+    batch_size = 8192 if grid >= 250 else 2048
+    dataset = tf.data.Dataset.from_tensor_slices((X_train, Y_train)).shuffle(10000).batch(batch_size)
+
+    print(f"starting training: {suffix}")
+    for epoch in range(50): 
+        for x_b, y_b in dataset:
+            tl, ld = train_step(x_b, y_b)
+        if epoch % 10 == 0:
+            print(f"Epoch {epoch}: Total Loss: {tl:.6f}")
+
+    Y_pred_log = []
+    for i in range(n_samples):
+        p = model.predict(X_coords[i], batch_size=batch_size, verbose=0)
+        Y_pred_log.append(p.reshape(grid, grid, 1))
+    
+    Y_pred_log = np.array(Y_pred_log)
+    
+    # expm1(pred * max_log)
+    Y_pred_phys = np.expm1(Y_pred_log * float(max_val_log))
+    Y_true_phys = np.expm1(Y_target_cyto * float(max_val_log))
+
+    res = {
+        "params": {"model": "PINN", "layers": "4x128", "grid": grid, "seed": seed, "cytokine": cyto},
+        "results": {
+            "Interpolation_72_89": calculate_metrics_phys(Y_true_phys[70:88], Y_pred_phys[70:88], M_all[70:88], grid),
+            "Extrapolation_82_100": calculate_metrics_phys(Y_true_phys[80:99], Y_pred_phys[80:99], M_all[80:99], grid)
+        }
+    }
+
+    json_path = out_dir / f"results_{suffix}.json"
+    weights_path = out_dir / f"weights_{suffix}.weights.h5"
+    
+    with open(json_path, 'w') as f:
+        json.dump(res, f, indent=4)
+    model.save_weights(weights_path)
+    
+    print(f"Saved JSON: {json_path}")
+    print(f"Saved Weights: {weights_path}")
+
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--grid", type=int, required=True)
     parser.add_argument("--cytokine", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
-
-    set_seed(args.seed)
-    cyto = args.cytokine.lower()
-    data_path = Path(f"./preprocessed/{args.grid}x{args.grid}")
-    out_dir = Path("./models/pinn")
-    out_dir.mkdir(parents=True, exist_ok=True)
     
-    X_trunk = np.load(data_path / "X_trunk.npy").astype(np.float32)
-    Y_target = np.load(data_path / "Y_target.npy").astype(np.float32).reshape(-1, 6)
-    M_all = np.load(data_path / "Y_masks.npy").astype(np.float32)
-    
-    num_train_full = int(0.7 * len(X_trunk))
-    X_train_pts = X_trunk[:num_train_full].reshape(-1, 3)
-    Y_train_pts = Y_target[:num_train_full*args.grid*args.grid]
-
-    D_tf, k_tf = get_pde_params()
-
-    print(f"\nHyperparameter Search (5k points, Seed: {args.seed})...")
-    idx_optuna = np.random.choice(len(X_train_pts), 5000, replace=False)
-    X_opt, Y_opt = X_train_pts[idx_optuna], Y_train_pts[idx_optuna]
-
-    def objective(trial):
-        tf.keras.backend.clear_session()
-        gc.collect()
-        trial_lr = trial.suggest_float("lr", 1e-4, 1e-3, log=True)
-        m = build_pinn_model(args.grid, cyto, trial_lr, D_tf, k_tf, X_opt, Y_opt)
-        res = m.train(iterations=1000, display_every=1000) 
-        return res[1].best_loss_train
-
-    study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=5)
-    best_lr = study.best_params['lr']
-
-    tf.keras.backend.clear_session()
-    gc.collect()
-    time.sleep(2)
-
-    print(f"Starting Training for {cyto.upper()}...")
-    idx_final = np.random.choice(len(X_train_pts), min(50000, len(X_train_pts)), replace=False)
-    X_final, Y_final = X_train_pts[idx_final], Y_train_pts[idx_final]
-
-    final_model = build_pinn_model(args.grid, cyto, best_lr, D_tf, k_tf, X_final, Y_final)
-    final_model.train(iterations=12000, display_every=1000)
-
-    Y_pred_all = np.array([final_model.predict(X_trunk[t]) for t in range(len(X_trunk))])
-    
-    with open(data_path / "scaling_params.json", 'r') as f:
-        scales = json.load(f)
-    
-    c_idx = CYTOKINE_MAP[cyto]
-    Y_pred_phys = np.expm1(Y_pred_all[..., c_idx:c_idx+1] * scales[cyto])
-    Y_true_phys = np.expm1(Y_target.reshape(len(X_trunk), args.grid, args.grid, 6)[..., c_idx:c_idx+1] * scales[cyto])
-
-    res_json = {
-        "params": study.best_params, "seed": args.seed, "grid": args.grid, "cytokine": cyto,
-        "results": {
-            "Interpolation_72_89": calculate_metrics_masked(Y_true_phys[70:88], Y_pred_phys[70:88], M_all[70:88], args.grid),
-            "Extrapolation_82_100": calculate_metrics_masked(Y_true_phys[80:99], Y_pred_phys[80:99], M_all[80:99], args.grid)
-        }
-    }
-
-    suffix = f"results_pinn_{cyto}_{args.grid}_s{args.seed}"
-    with open(out_dir / f"{suffix}.json", 'w') as f:
-        json.dump(res_json, f, indent=4)
-    
-    final_model.save(str(out_dir / f"weights_{suffix}"))
-    print(f"\nSaved results and weights for {suffix}")
-
-if __name__ == "__main__":
-    run_pinn_full()
+    run_pinn_experiment(args.grid, args.cytokine, args.seed)
