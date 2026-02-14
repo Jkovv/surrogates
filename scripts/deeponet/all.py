@@ -10,9 +10,10 @@ from scipy.stats import pearsonr
 from skimage.metrics import structural_similarity as ssim
 import warnings
 
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 warnings.filterwarnings("ignore")
+
+CYTOKINE_MAP = {"il8": 0, "il1": 1, "il6": 2, "il10": 3, "tnf": 4, "tgf": 5}
 
 def set_seed(seed):
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -20,122 +21,100 @@ def set_seed(seed):
     np.random.seed(seed)
     tf.random.set_seed(seed)
 
-@tf.keras.utils.register_keras_serializable()
-class ScaleLayer(tf.keras.layers.Layer):
-    def __init__(self, **kwargs):
-        super(ScaleLayer, self).__init__(**kwargs)
-    def build(self, input_shape):
-        self.scale = self.add_weight(name='output_multiplier', shape=(1,),
-                                    initializer='ones', trainable=True)
-    def call(self, inputs):
-        return inputs * self.scale
+def build_deeponet_fc(grid_size, n_features, p_dim=128):
 
-def positional_encoding(coords, L=10):
-    out = [coords]
-    for i in range(L):
-        for fn in [tf.sin, tf.cos]:
-            out.append(fn(2.0**i * np.pi * coords))
-    return tf.concat(out, axis=-1)
+    branch_in = tf.keras.layers.Input(shape=(grid_size, grid_size, n_features), name="Branch_Input")
+    b = tf.keras.layers.Flatten()(branch_in)
+    b = tf.keras.layers.Dense(256, activation='relu')(b)
+    b = tf.keras.layers.Dense(256, activation='relu')(b)
+    branch_out = tf.keras.layers.Dense(p_dim, activation='relu')(b)
+    
+    branch_out_rep = tf.keras.layers.RepeatVector(grid_size * grid_size)(branch_out)
 
-def build_dual_path_deeponet(grid_size, n_features, p_dim, L):
-    init = tf.keras.initializers.GlorotNormal()
-    
-    branch_in = tf.keras.layers.Input(shape=(grid_size, grid_size, n_features))
-    b = tf.keras.layers.Conv2D(32, 3, padding='same', activation='swish')(branch_in)
-    b = tf.keras.layers.BatchNormalization()(b)
-    b = tf.keras.layers.Conv2D(64, 3, strides=2, padding='same', activation='swish')(b)
-    b = tf.keras.layers.GlobalAveragePooling2D()(b)
-    b_vec = tf.keras.layers.Dense(p_dim, activation='swish', kernel_initializer=init)(b)
-    branch_out = tf.keras.layers.RepeatVector(grid_size * grid_size)(b_vec)
+    trunk_in = tf.keras.layers.Input(shape=(grid_size * grid_size, 3), name="Trunk_Input")
+    t = tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(128, activation='relu'))(trunk_in)
+    t = tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(128, activation='relu'))(t)
+    trunk_out = tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(p_dim, activation='relu'))(t)
 
-    trunk_raw = tf.keras.layers.Input(shape=(grid_size * grid_size, 3))
-    t_encoded = tf.keras.layers.TimeDistributed(tf.keras.layers.Lambda(lambda x: positional_encoding(x, L=L)))(trunk_raw)
-    t = tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(256, activation='swish'))(t_encoded)
-    t = tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(p_dim, activation='swish'))(t)
-    trunk_out = tf.keras.layers.LayerNormalization()(t)
+    combined = tf.keras.layers.Multiply()([branch_out_rep, trunk_out])
+    
+    output = tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(1, activation='linear'))(combined)
+    
+    return tf.keras.Model(inputs=[branch_in, trunk_in], outputs=output)
 
-    combined = tf.keras.layers.Multiply()([branch_out, trunk_out])
+def calculate_metrics_phys(y_true, y_pred, masks, max_val_log):
+    yt_phys = np.expm1(y_true * max_val_log)
+    yp_phys = np.expm1(np.maximum(y_pred, 0) * max_val_log)
     
-    res = tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(p_dim, activation='swish'))(combined)
-    combined = tf.keras.layers.Add()([combined, res])
+    spatial_mask = np.max(masks, axis=-1, keepdims=True)
+    r2 = r2_score(yt_phys.flatten(), yp_phys.flatten())
     
-    x = tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(1, activation='linear'))(combined)
-    output = ScaleLayer()(x)
-    return tf.keras.Model(inputs=[branch_in, trunk_raw], outputs=output)
+    sq_diff = np.square(yt_phys - yp_phys) * spatial_mask
+    m_rmse = np.sqrt(np.sum(sq_diff) / (np.sum(spatial_mask) + 1e-7))
 
-def calculate_metrics_phys(y_true, y_pred, masks, grid, scaling_max):
-    yt_phys = np.expm1(y_true * scaling_max)
-    yp_raw = np.expm1(np.maximum(y_pred, 0) * scaling_max)
-    
-    mask_spatial = np.max(masks, axis=-1).reshape(y_true.shape)
-    yt_m = yt_phys[mask_spatial > 0]
-    yp_m = yp_raw[mask_spatial > 0]
-    
-    if np.std(yp_m) > 1e-15:
-        slope = np.cov(yt_m, yp_m)[0,1] / np.var(yp_m)
-        intercept = np.mean(yt_m) - slope * np.mean(yp_m)
-        yp_final = slope * yp_m + intercept
-    else:
-        yp_final = yp_m
+    corrs = []
+    for t in range(yt_phys.shape[0]):
+        gt, pr = yt_phys[t].flatten(), yp_phys[t].flatten()
+        if np.std(gt) > 1e-12 and np.std(pr) > 1e-12:
+            corrs.append(pearsonr(gt, pr)[0])
 
     return {
-        "Global_R2": float(r2_score(yt_m, yp_final)),
-        "Masked_RMSE": float(np.sqrt(np.mean(np.square(yt_m - yp_final)))),
-        "Avg_SSIM": float(np.mean([ssim(yt_phys[j], yp_raw[j], data_range=max(yt_phys[j].max(), 1e-9)) for j in range(len(yt_phys))])),
-        "Spatial_Correlation": float(pearsonr(yt_m, yp_m)[0])
+        "Global_R2": float(r2),
+        "Masked_RMSE": float(m_rmse),
+        "Spatial_Correlation": float(np.mean(corrs)) if corrs else 0.0
     }
 
-def run_experiment():
+def run_deeponet_experiment(grid, cytokine, seed):
+    set_seed(seed)
+    data_path = Path(f"./preprocessed/{grid}x{grid}")
+    out_dir = Path("./models/deeponet")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    suffix = f"deeponet_fc_{cytokine.lower()}_grid{grid}_seed{seed}"
+    idx = CYTOKINE_MAP[cytokine.lower()]
+
+    X_branch = np.load(data_path / "X_branch.npy").astype(np.float32)
+    X_trunk = np.load(data_path / "X_trunk.npy").astype(np.float32)
+    Y_target = np.load(data_path / "Y_target.npy").astype(np.float32)[..., idx:idx+1]
+    M_all = np.load(data_path / "Y_masks.npy").astype(np.float32)
+
+    with open(data_path / "scaling_params.json", "r") as f:
+        scales = json.load(f)
+    max_val_log = scales[cytokine.lower()]
+
+    n = len(X_branch)
+    t_end, v_end = int(0.7 * n), int(0.8 * n)
+
+    model = build_deeponet_fc(grid, X_branch.shape[-1])
+    model.compile(optimizer=tf.keras.optimizers.Adam(1e-3), loss='mse')
+
+    print(f"training the DeepONet: {suffix}")
+    model.fit(
+        [X_branch[:t_end], X_trunk[:t_end]], 
+        Y_target[:t_end].reshape(t_end, -1, 1),
+        epochs=100, 
+        batch_size=1 if grid >= 250 else 8,
+        verbose=1
+    )
+
+    y_pred = model.predict([X_branch, X_trunk], batch_size=1).reshape(-1, grid, grid, 1)
+
+    res = {
+        "params": {"type": "FullyConnected_DeepONet", "p_dim": 128},
+        "results": {
+            "Interpolation_72_89": calculate_metrics_phys(Y_target[70:88], y_pred[70:88], M_all[70:88], max_val_log),
+            "Extrapolation_82_100": calculate_metrics_phys(Y_target[80:99], y_pred[80:99], M_all[80:99], max_val_log)
+        }
+    }
+
+    with open(out_dir / f"results_{suffix}.json", 'w') as f:
+        json.dump(res, f, indent=4)
+    model.save_weights(out_dir / f"weights_{suffix}.weights.h5")
+
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--grid", type=int, required=True)
     parser.add_argument("--cytokine", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
-
-    set_seed(args.seed)
-    cyto = args.cytokine.lower()
-    data_path = Path(f"./preprocessed/{args.grid}x{args.grid}")
-    
-    X_b = np.load(data_path / "X_branch.npy")
-    X_t = np.load(data_path / "X_trunk.npy")
-    Y_all = np.load(data_path / "Y_target.npy")
-    M_all = np.load(data_path / "Y_masks.npy")
-    
-    with open(data_path / "scaling_params.json", 'r') as f:
-        scales = json.load(f)
-    scaling_max = scales[cyto]
-
-    idx = {"il8": 0, "il1": 1, "il6": 2, "il10": 3, "tnf": 4, "tgf": 5}[cyto]
-    Y_cyto = Y_all[..., idx]
-
-    train_end, val_end = int(0.7 * len(X_b)), int(0.8 * len(X_b))
-
-    model = build_dual_path_deeponet(args.grid, X_b.shape[-1], 256, 10)
-    model.compile(optimizer=tf.keras.optimizers.Adam(1e-3), loss='log_cosh')
-    
-    model.fit(
-        [X_b[:train_end], X_t[:train_end]], Y_cyto[:train_end].reshape(train_end, -1, 1),
-        validation_data=([X_b[train_end:val_end], X_t[train_end:val_end]], 
-                         Y_cyto[train_end:val_end].reshape(val_end - train_end, -1, 1)),
-        epochs=150, batch_size=1 if args.grid >= 250 else 4,
-        callbacks=[tf.keras.callbacks.EarlyStopping(patience=30, restore_best_weights=True)]
-    )
-
-    preds = np.array([model.predict((X_b[i:i+1], X_t[i:i+1]), verbose=0).reshape(args.grid, args.grid) for i in range(len(X_b))])
-
-    res = {
-        "params": {"lr": 1e-3, "p_dim": 256, "L": 10, "type": "DeepONet-Operator"},
-        "results": {
-            "Interpolation_72_89": calculate_metrics_phys(Y_cyto[70:87], preds[70:87], M_all[70:87], args.grid, scaling_max),
-            "Extrapolation_82_100": calculate_metrics_phys(Y_cyto[80:98], preds[80:98], M_all[80:98], args.grid, scaling_max)
-        }
-    }
-
-    out_dir = Path("./models/deeponet")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    with open(out_dir / f"results_deeponet_{cyto}_{args.grid}_s{args.seed}.json", 'w') as f:
-        json.dump(res, f, indent=4)
-    model.save_weights(out_dir / f"weights_{cyto}_{args.grid}_s{args.seed}.weights.h5")
-
-if __name__ == "__main__":
-    run_experiment()
+    run_deeponet_experiment(args.grid, args.cytokine, args.seed)
