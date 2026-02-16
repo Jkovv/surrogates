@@ -11,6 +11,8 @@ from scipy.stats import pearsonr
 from skimage.metrics import structural_similarity as ssim
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
 CYTOKINE_MAP = {"il8": 0, "il1": 1, "il6": 2, "il10": 3, "tnf": 4, "tgf": 5}
 
 def set_seed(seed):
@@ -35,13 +37,13 @@ class STALSTMSingle(tf.keras.Model):
     def __init__(self, grid_size, filters=64, lstm_units=64):
         super().__init__()
         self.grid_size = grid_size
-        self.base_dim = grid_size // 4
+        self.base_dim = grid_size // 4 
         
-        # ENCODER
         self.encoder = tf.keras.layers.TimeDistributed(
             tf.keras.Sequential([
                 tf.keras.layers.Conv2D(filters, 3, padding='same', activation='relu'),
                 SpatialAttention(filters),
+                tf.keras.layers.Conv2D(filters, 3, strides=2, padding='same', activation='relu'),
                 tf.keras.layers.Conv2D(filters, 3, strides=2, padding='same', activation='relu'),
                 tf.keras.layers.GlobalAveragePooling2D()
             ])
@@ -49,7 +51,6 @@ class STALSTMSingle(tf.keras.Model):
         
         self.lstm = tf.keras.layers.LSTM(lstm_units, return_sequences=False)
         
-        # DECODER
         self.decoder = tf.keras.Sequential([
             tf.keras.layers.Dense(self.base_dim * self.base_dim * filters, activation='relu'),
             tf.keras.layers.Reshape((self.base_dim, self.base_dim, filters)),
@@ -64,41 +65,32 @@ class STALSTMSingle(tf.keras.Model):
         x = self.lstm(x)
         return self.decoder(x)
 
-def compute_dice_coefficient(y_true, y_pred, smooth=1e-6):
-    threshold = 0.05 
-    y_true_bin = (y_true > threshold).astype(np.float32)
-    y_pred_bin = (y_pred > threshold).astype(np.float32)
-    intersection = np.sum(y_true_bin * y_pred_bin)
-    union = np.sum(y_true_bin) + np.sum(y_pred_bin)
-    return (2. * intersection + smooth) / (union + smooth)
-
-def calculate_metrics(y_true, y_pred, masks):
+def calculate_metrics_phys(y_true, y_pred, masks):
     spatial_mask = np.max(masks, axis=-1, keepdims=True) 
     sq_diff = np.square(y_true - y_pred) * spatial_mask
-    m_rmse = np.sqrt(np.sum(sq_diff) / (np.sum(spatial_mask) + 1e-7))
+    m_rmse = np.sqrt(np.sum(sq_diff) / (np.sum(spatial_mask) + 1e-12))
+    
+    # R2 
     r2 = r2_score(y_true.flatten(), y_pred.flatten())
     
-    dices, corrs, ssim_vals = [], [], []
+    corrs, ssim_vals = [], []
     for t in range(y_true.shape[0]):
         gt, pr = y_true[t,:,:,0], y_pred[t,:,:,0]
-        dices.append(compute_dice_coefficient(gt, pr))
-        drange = max(gt.max(), 1.0)
-        win_size = min(7, gt.shape[0], gt.shape[1])
-        if win_size % 2 == 0: win_size -= 1
-        ssim_vals.append(ssim(gt, pr, data_range=drange, win_size=win_size))
-        if np.std(gt) > 1e-9 and np.std(pr) > 1e-9:
+        drange = max(gt.max() - gt.min(), 1e-12)
+        ssim_vals.append(ssim(gt, pr, data_range=drange, win_size=3))
+        if np.std(gt) > 1e-15 and np.std(pr) > 1e-15:
             corrs.append(pearsonr(gt.flatten(), pr.flatten())[0])
             
     return {
         "Global_R2": float(r2), 
-        "Masked_RMSE": float(m_rmse),
-        "Avg_Dice": float(np.mean(dices)),
+        "Masked_RMSE_Phys": float(m_rmse),
         "Avg_SSIM": float(np.mean(ssim_vals)),
         "Spatial_Correlation": float(np.mean(corrs)) if corrs else 0.0
     }
 
 def run_pipeline(grid, seed, cytokine):
     set_seed(seed)
+    
     data_path = Path(f"./preprocessed/{grid}x{grid}")
     out_dir = Path(f"./models/sta_lstm")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -108,12 +100,14 @@ def run_pipeline(grid, seed, cytokine):
 
     X_all = np.load(data_path / "X_lstm.npy").astype(np.float32)[..., idx:idx+1]
     Y_all_scaled = np.load(data_path / "Y_target.npy").astype(np.float32)[..., idx:idx+1]
-    M_all = np.load(data_path / "Y_masks.npy").astype(np.float32)
+    M_all = np.load(data_path / "Y_masks_spatial.npy").astype(np.float32)
 
-    with open(data_path / "scaling_params.json", "r") as f:
-        scaling_params = json.load(f)
-    max_val_log = scaling_params[cytokine]
+    with open(data_path / "metadata.json", "r") as f:
+        meta = json.load(f)
+    p_min = meta["scaling"]["min"][idx]
+    p_max = meta["scaling"]["max"][idx]
 
+    # 70/10/20 split
     n = len(X_all)
     t_end, v_end = int(0.7 * n), int(0.8 * n)
 
@@ -121,55 +115,48 @@ def run_pipeline(grid, seed, cytokine):
         tf.keras.backend.clear_session()
         f = trial.suggest_categorical("filters", [32, 64])
         u = trial.suggest_categorical("lstm_units", [64, 128])
-        lr = trial.suggest_float("lr", 1e-4, 2e-3, log=True)
+        lr = trial.suggest_float("lr", 1e-4, 1e-3, log=True)
         
         model = STALSTMSingle(grid, filters=f, lstm_units=u)
         model.compile(optimizer=tf.keras.optimizers.Adam(lr), loss="mse")
-        model.fit(X_all[:t_end], Y_all_scaled[:t_end], epochs=20, batch_size=8, verbose=0)
+        model.fit(X_all[:t_end], Y_all_scaled[:t_end], epochs=15, batch_size=8, verbose=0)
         loss = model.evaluate(X_all[t_end:v_end], Y_all_scaled[t_end:v_end], verbose=0)
         return loss
 
-    print(f"starting Optuna for {cytokine} (Seed: {seed})")
+    print(f"Optuna for {cytokine} | Grid {grid} | Seed {seed}")
     study = optuna.create_study(direction="minimize")
     study.optimize(objective, n_trials=5)
     
     best = study.best_params
-    print(f"best params: {best}")
+    print(f"Best params: {best}")
     
     final_model = STALSTMSingle(grid, filters=best["filters"], lstm_units=best["lstm_units"])
     final_model.compile(optimizer=tf.keras.optimizers.Adam(best["lr"]), loss="mse")
-    
-    print(f"training the final model")
-    final_model.fit(X_all[:v_end], Y_all_scaled[:v_end], epochs=200, batch_size=4, verbose=1)
+    final_model.fit(X_all[:v_end], Y_all_scaled[:v_end], epochs=150, batch_size=4, verbose=1)
     
     Y_pred_scaled = final_model.predict(X_all, verbose=0)
-    
-    # log scale 
-    Y_pred_phys = np.expm1(Y_pred_scaled * max_val_log)
-    Y_all_phys = np.expm1(Y_all_scaled * max_val_log)
+    Y_pred_phys = Y_pred_scaled * (p_max - p_min) + p_min
+    Y_all_phys = Y_all_scaled * (p_max - p_min) + p_min
     
     res = {
         "params": best, 
         "seed": seed, 
         "grid": grid, 
         "cytokine": cytokine,
-        "results": {
-            "Interpolation_72_89": calculate_metrics(Y_all_phys[70:88], Y_pred_phys[70:88], M_all[70:88]),
-            "Extrapolation_82_100": calculate_metrics(Y_all_phys[80:99], Y_pred_phys[80:99], M_all[80:99])
+        "results_phys": {
+            "Interpolation_72_89": calculate_metrics_phys(Y_all_phys[70:88], Y_pred_phys[70:88], M_all[70:88]),
+            "Extrapolation_82_100": calculate_metrics_phys(Y_all_phys[80:99], Y_pred_phys[80:99], M_all[80:99])
         }
     }
     
-    json_path = out_dir / f"results_{suffix}.json"
+    json_path = out_dir / f"res_{suffix}.json"
     weights_path = out_dir / f"weights_{suffix}.weights.h5"
     
     with open(json_path, 'w') as f:
         json.dump(res, f, indent=4)
         
     final_model.save_weights(weights_path)
-    
-    print(f"\nFiles saved:")
-    print(f" - JSON: {json_path}")
-    print(f" - Weights: {weights_path}")
+    print(f"Saved results for {suffix}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
