@@ -25,7 +25,7 @@ def process_mesh_resolution(folder_name):
     )[:N_TIMESTEPS]
 
     if not vtk_files:
-        print(f"Brak plików VTK w {folder_name}")
+        print(f"No VTK files in {folder_name}")
         return
 
     sample_mesh = pv.read(str(data_path / vtk_files[0]))
