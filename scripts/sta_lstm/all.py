@@ -107,7 +107,7 @@ def run_pipeline(grid, seed, cytokine):
     p_min = meta["scaling"]["min"][idx]
     p_max = meta["scaling"]["max"][idx]
 
-    # 70/10/20 split
+    # 70/10/20
     n = len(X_all)
     t_end, v_end = int(0.7 * n), int(0.8 * n)
 
