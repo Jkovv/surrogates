@@ -2,97 +2,84 @@ import os
 import numpy as np
 import pyvista as pv
 import json
+import re
 from pathlib import Path
 from sklearn.preprocessing import MinMaxScaler
 
 BASE_LATTICE_DIR = Path("./LatticeData")
-BASE_OUT_DIR = Path("./preprocessed") 
+BASE_OUT_DIR = Path("./preprocessed")
 BASE_OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 CYTOKINE_NAMES = ["il8", "il1", "il6", "il10", "tnf", "tgf"]
-CELL_TYPES = {"EC": 1, "NN": 2, "NA": 3, "M1": 4, "M2": 5} 
+CELL_TYPES = {"EC": 1, "NN": 2, "NA": 3, "M1": 4, "M2": 5}
 N_TIMESTEPS = 101
 
-def process_mesh_resolution(folder_name):
+def extract_grid_size(name):
+    match = re.search(r'(\d+)x(\d+)', name)
+    if match:
+        return int(match.group(1))
+    match = re.search(r'(\d+)', name)
+    if match:
+        return int(match.group(1))
+    return None
+
+def process_mesh(folder_name):
     data_path = BASE_LATTICE_DIR / folder_name
-    folder_clean = folder_name.replace("LatticeData", "").replace("(", "").replace(")", "").strip()
-    out_path = BASE_OUT_DIR / folder_clean
+    grid_size = extract_grid_size(folder_name)
+    
+    if grid_size is None:
+        print(f"Skipping {folder_name}: Could not determine grid size.")
+        return
+
+    out_path = BASE_OUT_DIR / f"{grid_size}x{grid_size}"
     out_path.mkdir(parents=True, exist_ok=True)
 
-    vtk_files = sorted(
-        [f for f in os.listdir(data_path) if f.lower().endswith(".vtk")],
-        key=lambda x: int(''.join(filter(str.isdigit, x)) or 0)
-    )[:N_TIMESTEPS]
+    vtk_files = sorted([f for f in os.listdir(data_path) if f.endswith(".vtk")],
+                       key=lambda x: int(''.join(filter(str.isdigit, x)) or 0))[:N_TIMESTEPS]
 
     if not vtk_files:
         print(f"No VTK files in {folder_name}")
         return
 
-    sample_mesh = pv.read(str(data_path / vtk_files[0]))
-    grid_size = int(np.sqrt(sample_mesh.n_points))
-    print(f"Processing: {folder_clean} ({grid_size}x{grid_size})")
+    print(f"Processing {grid_size}x{grid_size} from {folder_name}...")
 
-    raw_cytokines = np.zeros((N_TIMESTEPS, grid_size, grid_size, len(CYTOKINE_NAMES)), dtype=np.float32)
-    cell_masks = np.zeros((N_TIMESTEPS, grid_size, grid_size, len(CELL_TYPES)), dtype=np.float32)
+    raw_cyt = np.zeros((N_TIMESTEPS, grid_size, grid_size, 6), dtype=np.float32)
+    masks = np.zeros((N_TIMESTEPS, grid_size, grid_size, 5), dtype=np.float32)
     
-    for i, file in enumerate(vtk_files):
-        mesh = pv.read(str(data_path / file))
+    for i, f in enumerate(vtk_files):
+        mesh = pv.read(str(data_path / f))
         for j, ck in enumerate(CYTOKINE_NAMES):
-            raw_cytokines[i, :, :, j] = mesh.point_data[ck].reshape(grid_size, grid_size, order="F")
-        
+            data_array = mesh.point_data[ck]
+            raw_cyt[i, :, :, j] = data_array.reshape(grid_size, grid_size, order="F")
+            
         if 'CellType' in mesh.point_data:
-            ct_data = mesh.point_data['CellType'].reshape(grid_size, grid_size, order="F")
-            for j, (cell_name, cell_id) in enumerate(CELL_TYPES.items()):
-                cell_masks[i, :, :, j] = (ct_data == cell_id).astype(np.float32)
+            ct = mesh.point_data['CellType'].reshape(grid_size, grid_size, order="F")
+            for j, (_, cid) in enumerate(CELL_TYPES.items()):
+                masks[i, :, :, j] = (ct == cid).astype(np.float32)
 
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    # flatten to (Samples*H*W, C)
-    flat_data = raw_cytokines.reshape(-1, len(CYTOKINE_NAMES))
-    scaled_data = scaler.fit_transform(flat_data).reshape(raw_cytokines.shape)
+    np.save(out_path / "Y_raw_phys.npy", raw_cyt)
+    np.save(out_path / "Y_masks_spatial.npy", masks)
 
-    window = 2
-    n_samples = N_TIMESTEPS - window
+    # Log-scaling (10^-9 -> ~1.0)
+    log_data = np.log1p(raw_cyt * 1e7) 
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(log_data.reshape(-1, 6)).reshape(raw_cyt.shape)
+
+    np.save(out_path / "X_lstm.npy", np.stack([scaled[i-2:i] for i in range(2, 101)]))
+    np.save(out_path / "Y_target.npy", scaled[2:])
     
-    # LSTM / branch
-    X_lstm = np.stack([scaled_data[i-window:i] for i in range(window, N_TIMESTEPS)])
-    Y_target = scaled_data[window:]
-    
-    # trunk (x, y, t)
-    raw_coords = np.array(sample_mesh.points).reshape(grid_size, grid_size, 3)[:, :, :2]
-    c_min, c_max = raw_coords.min(), raw_coords.max()
-    norm_coords = (raw_coords - c_min) / (c_max - c_min)
-    t_norm = np.linspace(0, 1, N_TIMESTEPS)
-    
-    X_trunk = np.zeros((n_samples, grid_size * grid_size, 3), dtype=np.float32)
-    for s in range(n_samples):
-        X_trunk[s, :, :2] = norm_coords.reshape(-1, 2)
-        X_trunk[s, :, 2] = t_norm[s + window]
+    coords = np.stack(np.meshgrid(np.linspace(0, 1, grid_size), np.linspace(0, 1, grid_size), indexing='ij'), -1)
+    np.save(out_path / "coords_spatial.npy", coords)
 
-    # masks 
-    Y_masks_spatial = cell_masks[window:]
-    Y_masks_pinn = Y_masks_spatial.reshape(n_samples, grid_size * grid_size, len(CELL_TYPES))
-
-    np.save(out_path / "X_lstm.npy", X_lstm)
-    np.save(out_path / "X_trunk.npy", X_trunk)
-    np.save(out_path / "Y_target.npy", Y_target)
-    np.save(out_path / "Y_masks_spatial.npy", Y_masks_spatial)
-    np.save(out_path / "Y_masks_pinn.npy", Y_masks_pinn)
-
-    metadata = {
-        "res": folder_clean,
-        "grid": grid_size,
-        "scaling": {"min": scaler.data_min_.tolist(), "max": scaler.data_max_.tolist()},
-        "cytokines": CYTOKINE_NAMES,
-        "cells": list(CELL_TYPES.keys()),
-        "n_samples": n_samples
-    }
     with open(out_path / "metadata.json", "w") as f:
-        json.dump(metadata, f, indent=4)
-
-    print(f"Success!")
+        json.dump({
+            "grid": grid_size, 
+            "scaling": {"min": scaler.data_min_.tolist(), "max": scaler.data_max_.tolist()},
+            "cytokines": CYTOKINE_NAMES
+        }, f, indent=4)
+    print(f"Saved to {out_path}")
 
 if __name__ == "__main__":
-    if BASE_LATTICE_DIR.exists():
-        folders = sorted([d for d in os.listdir(BASE_LATTICE_DIR) if (BASE_LATTICE_DIR / d).is_dir()])
-        for f in folders:
-            process_mesh_resolution(f)
+    for folder in sorted(os.listdir(BASE_LATTICE_DIR)):
+        if (BASE_LATTICE_DIR / folder).is_dir():
+            process_mesh(folder)
