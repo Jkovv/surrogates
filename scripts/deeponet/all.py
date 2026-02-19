@@ -44,13 +44,14 @@ class DeepONet(tf.keras.Model):
 
     def call(self, inputs):
         x_b, x_t = inputs
+        # x_b: [Batch, 2, H, W, 1] -> [Batch, H, W, 2]
         x_b_reshaped = tf.reshape(x_b, [tf.shape(x_b)[0], tf.shape(x_b)[2], tf.shape(x_b)[3], 2])
         
         b_vec = self.branch(x_b_reshaped) 
         
         spatial_vec = self.trunk_spatial(x_t[..., :2])
         temporal_vec = self.trunk_temporal(x_t[..., 2:3])
-        t_vec = spatial_vec * temporal_vec 
+        t_vec = spatial_vec * temporal_vec # Hadamard product (X)
         
         b_vec = tf.expand_dims(b_vec, axis=1)
         return tf.reduce_sum(b_vec * t_vec, axis=-1, keepdims=True)
@@ -81,6 +82,7 @@ def run_pipeline(grid, seed, cytokine):
     M = np.load(data_path / "Y_masks_spatial.npy").astype(np.float32)
 
     model = DeepONet(filters=64, latent_dim=256)
+    # Adam with clipnorm to prevent astronomical weights
     model.compile(optimizer=tf.keras.optimizers.Adam(2e-4, clipnorm=1.0), loss='mse')
 
     print(f"Training DeepONet: {cytokine} | Grid: {grid}")
