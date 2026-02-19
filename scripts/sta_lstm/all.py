@@ -1,162 +1,104 @@
-import os
-import json
-import argparse
-import random
-import numpy as np
-import tensorflow as tf
-import optuna
+import os, json, argparse, random, numpy as np, tensorflow as tf, optuna
 from pathlib import Path
 from sklearn.metrics import r2_score
 from scipy.stats import pearsonr
 from skimage.metrics import structural_similarity as ssim
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-
-CYTOKINE_MAP = {"il8": 0, "il1": 1, "il6": 2, "il10": 3, "tnf": 4, "tgf": 5}
 
 def set_seed(seed):
     os.environ['PYTHONHASHSEED'] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
     tf.random.set_seed(seed)
-    os.environ['TF_DETERMINISTIC_OPS'] = '1'
 
-class SpatialAttention(tf.keras.layers.Layer):
-    def __init__(self, filters):
-        super().__init__()
-        self.conv = tf.keras.layers.Conv2D(filters, 3, padding='same', activation='relu')
-        self.attn = tf.keras.layers.Conv2D(1, 1, padding='same', activation='sigmoid')
-
-    def call(self, inputs):
-        x = self.conv(inputs)
-        a = self.attn(x)
-        return inputs * a 
-
-class STALSTMSingle(tf.keras.Model):
+class STALSTM(tf.keras.Model):
     def __init__(self, grid_size, filters=64, lstm_units=64):
         super().__init__()
         self.grid_size = grid_size
-        self.base_dim = grid_size // 4 
-        
-        self.encoder = tf.keras.layers.TimeDistributed(
-            tf.keras.Sequential([
-                tf.keras.layers.Conv2D(filters, 3, padding='same', activation='relu'),
-                SpatialAttention(filters),
-                tf.keras.layers.Conv2D(filters, 3, strides=2, padding='same', activation='relu'),
-                tf.keras.layers.Conv2D(filters, 3, strides=2, padding='same', activation='relu'),
-                tf.keras.layers.GlobalAveragePooling2D()
-            ])
-        )
-        
-        self.lstm = tf.keras.layers.LSTM(lstm_units, return_sequences=False)
-        
-        self.decoder = tf.keras.Sequential([
-            tf.keras.layers.Dense(self.base_dim * self.base_dim * filters, activation='relu'),
-            tf.keras.layers.Reshape((self.base_dim, self.base_dim, filters)),
-            tf.keras.layers.Conv2DTranspose(filters // 2, 3, strides=2, padding='same', activation='relu'),
-            tf.keras.layers.Conv2DTranspose(filters // 4, 3, strides=2, padding='same', activation='relu'),
-            tf.keras.layers.Conv2D(1, 3, padding='same', activation='sigmoid'),
+        self.latent_dim = 16
+        self.enc = tf.keras.layers.TimeDistributed(tf.keras.Sequential([
+            tf.keras.layers.Conv2D(filters, 3, strides=2, padding='same', activation='relu'),
+            tf.keras.layers.Conv2D(filters, 3, strides=2, padding='same', activation='relu'),
+            tf.keras.layers.GlobalAveragePooling2D()
+        ]))
+        self.lstm = tf.keras.layers.LSTM(lstm_units)
+        self.dec = tf.keras.Sequential([
+            tf.keras.layers.Dense(self.latent_dim * self.latent_dim * filters, activation='relu'),
+            tf.keras.layers.Reshape((self.latent_dim, self.latent_dim, filters)),
+            tf.keras.layers.Conv2DTranspose(filters//2, 3, strides=2, padding='same', activation='relu'),
+            tf.keras.layers.Conv2DTranspose(filters//4, 3, strides=2, padding='same', activation='relu'),
+            tf.keras.layers.Conv2D(1, 3, padding='same', activation='linear'),
             tf.keras.layers.Resizing(grid_size, grid_size)
         ])
 
-    def call(self, inputs):
-        x = self.encoder(inputs)
-        x = self.lstm(x)
-        return self.decoder(x)
+    def call(self, x):
+        return self.dec(self.lstm(self.enc(x)))
 
 def calculate_metrics_phys(y_true, y_pred, masks):
-    spatial_mask = np.max(masks, axis=-1, keepdims=True) 
+    spatial_mask = np.max(masks, axis=-1, keepdims=True)
+    y_pred = np.maximum(y_pred, 0)
     sq_diff = np.square(y_true - y_pred) * spatial_mask
-    m_rmse = np.sqrt(np.sum(sq_diff) / (np.sum(spatial_mask) + 1e-12))
-    
-    # R2 
+    rmse = np.sqrt(np.sum(sq_diff) / (np.sum(spatial_mask) + 1e-12))
     r2 = r2_score(y_true.flatten(), y_pred.flatten())
     
-    corrs, ssim_vals = [], []
+    dices, ssim_vals, corrs = [], [], []
     for t in range(y_true.shape[0]):
         gt, pr = y_true[t,:,:,0], y_pred[t,:,:,0]
-        drange = max(gt.max() - gt.min(), 1e-12)
-        ssim_vals.append(ssim(gt, pr, data_range=drange, win_size=3))
-        if np.std(gt) > 1e-15 and np.std(pr) > 1e-15:
+        thresh = 0.05 * np.max(gt) if np.max(gt) > 0 else 1e-9
+        yt_b, yp_b = (gt > thresh).astype(float), (pr > thresh).astype(float)
+        dices.append((2.*np.sum(yt_b*yp_b)+1e-6)/(np.sum(yt_b)+np.sum(yp_b)+1e-6))
+        ssim_vals.append(ssim(gt, pr, data_range=max(gt.max()-gt.min(), 1e-9), win_size=3))
+        if np.std(gt) > 1e-12 and np.std(pr) > 1e-12:
             corrs.append(pearsonr(gt.flatten(), pr.flatten())[0])
             
-    return {
-        "Global_R2": float(r2), 
-        "Masked_RMSE_Phys": float(m_rmse),
-        "Avg_SSIM": float(np.mean(ssim_vals)),
-        "Spatial_Correlation": float(np.mean(corrs)) if corrs else 0.0
-    }
+    return {"Global_R2": float(r2), "Masked_RMSE_Phys": float(rmse), 
+            "Avg_Dice": float(np.mean(dices)), "Avg_SSIM": float(np.mean(ssim_vals)),
+            "Spatial_Correlation": float(np.mean(corrs)) if corrs else 0.0}
 
 def run_pipeline(grid, seed, cytokine):
     set_seed(seed)
-    
     data_path = Path(f"./preprocessed/{grid}x{grid}")
     out_dir = Path(f"./models/sta_lstm")
     out_dir.mkdir(parents=True, exist_ok=True)
     
-    suffix = f"{cytokine}_grid{grid}_seed{seed}"
-    idx = CYTOKINE_MAP[cytokine]
+    idx = {"il8":0, "il1":1, "il6":2, "il10":3, "tnf":4, "tgf":5}[cytokine.lower()]
+    X = np.load(data_path / "X_lstm.npy")[..., idx:idx+1]
+    Y = np.load(data_path / "Y_target.npy")[..., idx:idx+1]
+    M = np.load(data_path / "Y_masks_spatial.npy")[2:]
+    
+    with open(data_path / "metadata.json", "r") as f: meta = json.load(f)
+    p_min, p_max = meta["scaling"]["min"][idx], meta["scaling"]["max"][idx]
 
-    X_all = np.load(data_path / "X_lstm.npy").astype(np.float32)[..., idx:idx+1]
-    Y_all_scaled = np.load(data_path / "Y_target.npy").astype(np.float32)[..., idx:idx+1]
-    M_all = np.load(data_path / "Y_masks_spatial.npy").astype(np.float32)
-
-    with open(data_path / "metadata.json", "r") as f:
-        meta = json.load(f)
-    p_min = meta["scaling"]["min"][idx]
-    p_max = meta["scaling"]["max"][idx]
-
-    # 70/10/20
-    n = len(X_all)
-    t_end, v_end = int(0.7 * n), int(0.8 * n)
+    def loss_fn(yt, yp):
+        w = tf.cast(yt > 0.01, tf.float32) * 50.0 + 1.0
+        return tf.reduce_mean(w * tf.square(yt - yp))
 
     def objective(trial):
         tf.keras.backend.clear_session()
-        f = trial.suggest_categorical("filters", [32, 64])
-        u = trial.suggest_categorical("lstm_units", [64, 128])
-        lr = trial.suggest_float("lr", 1e-4, 1e-3, log=True)
-        
-        model = STALSTMSingle(grid, filters=f, lstm_units=u)
-        model.compile(optimizer=tf.keras.optimizers.Adam(lr), loss="mse")
-        model.fit(X_all[:t_end], Y_all_scaled[:t_end], epochs=15, batch_size=8, verbose=0)
-        loss = model.evaluate(X_all[t_end:v_end], Y_all_scaled[t_end:v_end], verbose=0)
-        return loss
+        m = STALSTM(grid, trial.suggest_categorical("f", [32, 64]), trial.suggest_int("u", 64, 128))
+        m.compile(optimizer=tf.keras.optimizers.Adam(trial.suggest_float("lr", 1e-4, 1e-3, log=True)), loss=loss_fn)
+        m.fit(X[:70], Y[:70], epochs=5, batch_size=4, verbose=0)
+        return m.evaluate(X[70:80], Y[70:80], verbose=0)
 
-    print(f"Optuna for {cytokine} | Grid {grid} | Seed {seed}")
     study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=5)
-    
+    study.optimize(objective, n_trials=3)
     best = study.best_params
-    print(f"Best params: {best}")
     
-    final_model = STALSTMSingle(grid, filters=best["filters"], lstm_units=best["lstm_units"])
-    final_model.compile(optimizer=tf.keras.optimizers.Adam(best["lr"]), loss="mse")
-    final_model.fit(X_all[:v_end], Y_all_scaled[:v_end], epochs=150, batch_size=4, verbose=1)
+    model = STALSTM(grid, best["f"], best["u"])
+    model.compile(optimizer=tf.keras.optimizers.Adam(best["lr"], clipnorm=1.0), loss=loss_fn)
+    model.fit(X[:80], Y[:80], epochs=100, batch_size=4, verbose=1)
     
-    Y_pred_scaled = final_model.predict(X_all, verbose=0)
-    Y_pred_phys = Y_pred_scaled * (p_max - p_min) + p_min
-    Y_all_phys = Y_all_scaled * (p_max - p_min) + p_min
+    Y_p = model.predict(X) * (p_max - p_min) + p_min
+    Y_a = Y * (p_max - p_min) + p_min
     
-    res = {
-        "params": best, 
-        "seed": seed, 
-        "grid": grid, 
-        "cytokine": cytokine,
-        "results_phys": {
-            "Interpolation_72_89": calculate_metrics_phys(Y_all_phys[70:88], Y_pred_phys[70:88], M_all[70:88]),
-            "Extrapolation_82_100": calculate_metrics_phys(Y_all_phys[80:99], Y_pred_phys[80:99], M_all[80:99])
-        }
-    }
-    
-    json_path = out_dir / f"res_{suffix}.json"
-    weights_path = out_dir / f"weights_{suffix}.weights.h5"
-    
-    with open(json_path, 'w') as f:
-        json.dump(res, f, indent=4)
-        
-    final_model.save_weights(weights_path)
-    print(f"Saved results for {suffix}")
+    suffix = f"{cytokine}_{grid}_{seed}"
+    res = {"params": best, "grid": grid, "seed": seed, "results": {
+        "Interp": calculate_metrics_phys(Y_a[70:88], Y_p[70:88], M[70:88]),
+        "Extrap": calculate_metrics_phys(Y_a[80:99], Y_p[80:99], M[80:99])
+    }}
+    with open(out_dir / f"res_{suffix}.json", 'w') as f: json.dump(res, f, indent=4)
+    model.save_weights(out_dir / f"weights_{suffix}.weights.h5")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -164,4 +106,4 @@ if __name__ == "__main__":
     parser.add_argument("--cytokine", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
-    run_pipeline(args.grid, args.seed, args.cytokine.lower())
+    run_pipeline(args.grid, args.seed, args.cytokine)
