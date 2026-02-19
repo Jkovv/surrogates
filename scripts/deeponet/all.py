@@ -7,10 +7,6 @@ import tensorflow as tf
 from pathlib import Path
 from sklearn.metrics import r2_score
 from scipy.stats import pearsonr
-from skimage.metrics import structural_similarity as ssim
-
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-CYTOKINE_MAP = {"il8": 0, "il1": 1, "il6": 2, "il10": 3, "tnf": 4, "tgf": 5}
 
 def set_seed(seed):
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -19,79 +15,61 @@ def set_seed(seed):
     tf.random.set_seed(seed)
 
 class DeepONet(tf.keras.Model):
-    def __init__(self, filters=32, latent_dim=128):
+    def __init__(self, grid_size, p=128):
         super().__init__()
-        self.latent_dim = latent_dim
-        
-        # BRANCH 
+        self.grid_size = grid_size
+        self.p = p
+
+        # Branch
         self.branch = tf.keras.Sequential([
-            tf.keras.layers.InputLayer(input_shape=(None, None, 2)), # 2 frames
-            tf.keras.layers.Conv2D(filters, 3, strides=2, padding='same', activation='relu'),
-            tf.keras.layers.Conv2D(filters*2, 3, strides=2, padding='same', activation='relu'),
-            tf.keras.layers.GlobalAveragePooling2D(),
-            tf.keras.layers.Dense(latent_dim, activation='relu'),
-            tf.keras.layers.Dense(latent_dim)
+            tf.keras.layers.TimeDistributed(tf.keras.layers.Conv2D(32, 3, strides=2, padding='same')),
+            tf.keras.layers.TimeDistributed(tf.keras.layers.Conv2D(64, 3, strides=2, padding='same')),
+            tf.keras.layers.TimeDistributed(tf.keras.layers.GlobalAveragePooling2D()),
+            tf.keras.layers.LSTM(128),
+            tf.keras.layers.Activation('relu'), 
+            tf.keras.layers.Dense(p),         
         ])
-        
-        # TRUNK 
-        self.trunk_spatial = tf.keras.Sequential([
-            tf.keras.layers.Dense(latent_dim, activation='relu'),
-            tf.keras.layers.Dense(latent_dim)
+
+        # Trunk
+        self.trunk = tf.keras.Sequential([
+            tf.keras.layers.Dense(64),
+            tf.keras.layers.Activation('relu'), 
+            tf.keras.layers.Dense(p),         
         ])
-        self.trunk_temporal = tf.keras.Sequential([
-            tf.keras.layers.Dense(latent_dim, activation='relu'),
-            tf.keras.layers.Dense(latent_dim)
-        ])
+
+        self.b = self.add_weight(shape=(1,), initializer="zeros", trainable=True)
 
     def call(self, inputs):
-        x_b, x_t = inputs
-        x_b_reshaped = tf.reshape(x_b, [tf.shape(x_b)[0], tf.shape(x_b)[2], tf.shape(x_b)[3], 2])
+        x_b = self.branch(inputs[0]) 
+        x_t = self.trunk(inputs[1])  
         
-        b_vec = self.branch(x_b_reshaped) 
+        res = tf.einsum("bp,bnp->bn", x_b, x_t)
+        res = res + self.b
         
-        spatial_vec = self.trunk_spatial(x_t[..., :2])
-        temporal_vec = self.trunk_temporal(x_t[..., 2:3])
-        t_vec = spatial_vec * temporal_vec # Hadamard product (X)
-        
-        b_vec = tf.expand_dims(b_vec, axis=1)
-        return tf.reduce_sum(b_vec * t_vec, axis=-1, keepdims=True)
+        return tf.expand_dims(tf.reshape(res, [-1, self.grid_size, self.grid_size]), -1)
 
-
-def calculate_metrics_phys(y_true_phys, y_pred_phys, masks, grid_size):
-    y_p = np.maximum(y_pred_phys.reshape(-1, grid_size, grid_size, 1), 0)
-    y_t = y_true_phys.reshape(-1, grid_size, grid_size, 1)
-    spatial_mask = np.max(masks, axis=-1, keepdims=True)
+def calculate_metrics_phys(y_true, y_pred, masks):
+    min_t = min(y_true.shape[0], y_pred.shape[0], masks.shape[0])
+    y_t, y_p = y_true[:min_t], np.maximum(y_pred[:min_t], 0)
+    m_s = np.max(masks[:min_t], axis=-1, keepdims=True)
     
-    # masked RMSE 
-    sq_diff = np.square(y_t - y_p) * spatial_mask
-    rmse = np.sqrt(np.sum(sq_diff) / (np.sum(spatial_mask) + 1e-12))
-    
-    # global R2
+    # RMSE & R2
+    sq_diff = np.square(y_t - y_p) * m_s
+    rmse = np.sqrt(np.sum(sq_diff) / (np.sum(m_s) + 1e-12))
     r2 = r2_score(y_t.flatten(), y_p.flatten())
     
-    dices, ssim_vals, corrs = [], [], []
-    for i in range(y_t.shape[0]):
-        gt, pr = y_t[i, :, :, 0], y_p[i, :, :, 0]
-        
-        # dice
+    dices, corrs = [], []
+    for t in range(min_t):
+        gt, pr = y_t[t,:,:,0], y_p[t,:,:,0]
         thresh = 0.05 * np.max(gt) if np.max(gt) > 0 else 1e-9
         yt_b, yp_b = (gt > thresh).astype(float), (pr > thresh).astype(float)
         dices.append((2.*np.sum(yt_b*yp_b)+1e-6)/(np.sum(yt_b)+np.sum(yp_b)+1e-6))
-        
-        # ssim
-        data_range = max(gt.max() - gt.min(), 1e-9)
-        ssim_vals.append(ssim(gt, pr, data_range=data_range, win_size=3))
-        
-        # Spatial Correlation
         if np.std(gt) > 1e-12 and np.std(pr) > 1e-12:
             corrs.append(pearsonr(gt.flatten(), pr.flatten())[0])
             
     return {
-        "Global_R2": float(r2),
-        "Masked_RMSE_Phys": float(rmse),
-        "Avg_Dice": float(np.mean(dices)),
-        "Avg_SSIM": float(np.mean(ssim_vals)),
-        "Spatial_Correlation": float(np.mean(corrs)) if corrs else 0.0
+        "Global_R2": float(r2), "Masked_RMSE_Phys": float(rmse),
+        "Avg_Dice": float(np.mean(dices)), "Spatial_Correlation": float(np.mean(corrs)) if corrs else 0.0
     }
 
 def run_pipeline(grid, seed, cytokine):
@@ -100,45 +78,50 @@ def run_pipeline(grid, seed, cytokine):
     out_dir = Path(f"./models/deeponet")
     out_dir.mkdir(parents=True, exist_ok=True)
     
-    idx = CYTOKINE_MAP[cytokine.lower()]
+    idx = {"il8":0, "il1":1, "il6":2, "il10":3, "tnf":4, "tgf":5}[cytokine.lower()]
     X_b = np.load(data_path / "X_lstm.npy").astype(np.float32)[..., idx:idx+1]
     X_t = np.load(data_path / "X_trunk.npy").astype(np.float32)
-    Y_target = np.load(data_path / "Y_target.npy").astype(np.float32)[..., idx:idx+1].reshape(99, -1, 1)
-    
-    Y_phys_raw = np.load(data_path / "Y_raw_phys.npy").astype(np.float32)[2:, ..., idx:idx+1].reshape(99, -1, 1)
+    Y = np.load(data_path / "Y_target.npy").astype(np.float32)[..., idx:idx+1]
     M = np.load(data_path / "Y_masks_spatial.npy").astype(np.float32)
 
     with open(data_path / "metadata.json", "r") as f:
         meta = json.load(f)
     p_min, p_max = meta["scaling"]["min"][idx], meta["scaling"]["max"][idx]
 
-    model = DeepONet(filters=64, latent_dim=256)
-    model.compile(optimizer=tf.keras.optimizers.Adam(2e-4, clipnorm=1.0), loss='mse')
+    model = DeepONet(grid)
+    model.compile(optimizer=tf.keras.optimizers.Adam(1e-4), loss='mse')
 
-    print(f"Training DeepONet: {cytokine} | Grid: {grid}")
-    model.fit([X_b[:80], X_t[:80]], Y_target[:80], epochs=200, batch_size=4, verbose=1)
+    model.fit([X_b[:80], X_t[:80]], Y[:80], epochs=100, batch_size=4, verbose=0)
 
-    Y_p_scaled = model.predict([X_b, X_t], batch_size=2)
-    Y_p_phys = Y_p_scaled * (p_max - p_min) + p_min
+    Y_p = model.predict([X_b, X_t], batch_size=2) * (p_max - p_min) + p_min
+    Y_a = Y * (p_max - p_min) + p_min
 
-    suffix = f"{cytokine}_{grid}_{seed}"
+    suffix = f"{cytokine}_{grid}_{seed}" 
+    
     results = {
         "grid": grid, "seed": seed, "cytokine": cytokine,
-        "results_physical": {
-            "Interp": calculate_metrics_phys(Y_phys_raw[70:88], Y_p_phys[70:88], M[70:88], grid),
-            "Extrap": calculate_metrics_phys(Y_phys_raw[80:99], Y_p_phys[80:99], M[80:99], grid)
+        "results": {
+            "Interpolation_72_89": calculate_metrics_phys(Y_a[70:88], Y_p[70:88], M[70:88]),
+            "Extrapolation_82_100": calculate_metrics_phys(Y_a[80:99], Y_p[80:99], M[80:99])
         }
     }
 
     with open(out_dir / f"res_{suffix}.json", 'w') as f:
-        json.dump(results, f, indent=4)
-    model.save_weights(out_dir / f"weights_{suffix}.weights.h5")
-    print(f"DONE: Results saved for {suffix}")
+        json.dump(results, f, indent=4) 
+    model.save_weights(out_dir / f"weights_{suffix}.weights.h5") 
+    print(f"DONE: {suffix}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--grid", type=int, required=True)
+    parser.add_argument("--grid", type=int)
     parser.add_argument("--cytokine", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
-    run_pipeline(args.grid, args.seed, args.cytokine)
+
+    if args.grid:
+        run_pipeline(args.grid, args.seed, args.cytokine)
+    else:
+        for d in Path("./preprocessed").iterdir():
+            if d.is_dir():
+                grid_size = int(d.name.split('x')[0])
+                run_pipeline(grid_size, args.seed, args.cytokine)
