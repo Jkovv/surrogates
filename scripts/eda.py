@@ -37,7 +37,7 @@ def run_global_characterization_suite():
         if not vtk_files: continue
 
         ts_metrics = {c: {
-            "max": [], "mean": [], "std": [], 
+            "max": [], "min": [], "mean": [], "std": [], 
             "skew": [], "kurt": [], "nz_pct": []
         } for c in CYTOKINES}
         
@@ -55,6 +55,7 @@ def run_global_characterization_suite():
                 vals = mesh.point_data[cyto]
                 
                 ts_metrics[cyto]["max"].append(np.max(vals))
+                ts_metrics[cyto]["min"].append(np.min(vals))
                 ts_metrics[cyto]["mean"].append(np.mean(vals))
                 ts_metrics[cyto]["std"].append(np.std(vals))
                 
@@ -74,6 +75,7 @@ def run_global_characterization_suite():
             if not ts_metrics[cyto]["max"]: continue
             
             g_max = np.max(ts_metrics[cyto]["max"])
+            g_min = np.min(ts_metrics[cyto]["min"])
             
             avg_skew = np.mean(ts_metrics[cyto]["skew"]) if ts_metrics[cyto]["skew"] else np.nan
             avg_kurt = np.mean(ts_metrics[cyto]["kurt"]) if ts_metrics[cyto]["kurt"] else np.nan
@@ -81,6 +83,7 @@ def run_global_characterization_suite():
             all_stats.append({
                 "Grid": grid,
                 "Cytokine": cyto.upper(),
+                "Global_Min": f"{g_min:.4e}",
                 "Global_Max": f"{g_max:.4e}",
                 "Time_Avg_Mean": f"{np.mean(ts_metrics[cyto]['mean']):.4e}",
                 "Time_Avg_Std": f"{np.mean(ts_metrics[cyto]['std']):.4e}",
@@ -110,7 +113,7 @@ def run_global_characterization_suite():
 
     if all_stats:
         pd.DataFrame(all_stats).to_csv(OUTPUT_DIR / "summary.csv", index=False)
-        print(f"\nResults saved.")
+        print(f"\nResults saved to {OUTPUT_DIR}/summary.csv")
 
 if __name__ == "__main__":
     run_global_characterization_suite()
