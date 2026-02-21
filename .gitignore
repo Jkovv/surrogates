@@ -1,0 +1,4 @@
+*.h5
+*.weights.h5
+models/deeponet/*.weights.h5
+eda/
