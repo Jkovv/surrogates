@@ -164,7 +164,7 @@ def run_pipeline(grid: int, seed: int, cytokine: str):
     idx       = cyt_names.index(cytokine.lower())
 
     data_path = Path(f"./preprocessed/{grid}x{grid}")
-    out_dir   = Path("./models/deeponet")
+    out_dir   = Path("./models/deeponet_f")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     X_b = np.load(data_path / "X_branch.npy").astype(np.float32)
@@ -240,3 +240,4 @@ if __name__ == "__main__":
             if d.is_dir():
                 grid_size = int(d.name.split("x")[0])
                 run_pipeline(grid_size, args.seed, args.cytokine)
+
