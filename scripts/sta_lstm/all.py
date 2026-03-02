@@ -32,9 +32,8 @@ class SpatialAttention(tf.keras.layers.Layer):
         )
 
     def call(self, x):
-        # x: (batch,H,W,C)
-        attn_map = self.attn_conv(x)    
-        return x * attn_map          
+        attn_map = self.attn_conv(x)      
+        return x * attn_map              
 
 class STALSTM(tf.keras.Model):
     def __init__(self, grid_size: int, filters: int = 64,
@@ -43,8 +42,8 @@ class STALSTM(tf.keras.Model):
         self.grid_size   = grid_size
         self.filters     = filters
         self.lstm_units  = lstm_units
-        self.latent_size = max(grid_size // 4, 8)   
-                     
+        self.latent_size = max(grid_size // 4, 8) 
+
         # encoder 
         self.enc = tf.keras.layers.TimeDistributed(
             tf.keras.Sequential([
@@ -74,7 +73,7 @@ class STALSTM(tf.keras.Model):
             (self.latent_size, self.latent_size, filters)
         )
 
-        # decoder 
+        # decoder
         self.deconv1 = tf.keras.layers.Conv2DTranspose(
             filters // 2, 3, strides=2, padding="same", activation="relu"
         )
@@ -86,20 +85,18 @@ class STALSTM(tf.keras.Model):
         self.out_resize = tf.keras.layers.Resizing(grid_size, grid_size)
 
     def call(self, x):
-        h = self.enc(x)               # (batch, 2, G/4, G/4, filters)
-        h = self.spatial_attn(h)      # (batch, 2, G/4, G/4, filters) — attended
-        h = self.gap(h)               # (batch, 2, filters)
-        h = self.lstm(h)              # (batch, lstm_units)
+        h = self.enc(x)              
+        h = self.spatial_attn(h)     
+        h = self.gap(h)               
+        h = self.lstm(h)              
         h = self.relu(h)
-        h = self.fc(h)                # (batch, latent_size^2 * filters)
-        h = self.reshape_latent(h)    # (batch, latent_size, latent_size, filters)
-        h = self.deconv1(h)           # upsample × 2
-        h = self.deconv2(h)           # upsample × 2
-        h = self.out_conv(h)          # (batch, *, *, 1)
-        return self.out_resize(h)     # (batch, G, G, 1)
+        h = self.fc(h)                
+        h = self.reshape_latent(h)    
+        h = self.deconv1(h)           
+        h = self.deconv2(h)           
+        h = self.out_conv(h)          
+        return self.out_resize(h)     
 
-
-# metrics 
 def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
                       masks: np.ndarray) -> dict:
     min_t = min(y_true.shape[0], y_pred.shape[0], masks.shape[0])
@@ -137,13 +134,9 @@ def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
         "SSIM":                float(np.mean(ssims))  if ssims  else 0.0,
     }
 
-
-# denormaliztion 
 def denormalize(scaled: np.ndarray, clip_max: float) -> np.ndarray:
     return (np.asarray(scaled, dtype=np.float64) + 1.0) / 2.0 * clip_max
 
-
-# optuna 
 def make_objective(X_train, Y_train, X_val, Y_val, grid_size, seed):
     def objective(trial):
         set_seed(seed)
@@ -174,8 +167,6 @@ def make_objective(X_train, Y_train, X_val, Y_val, grid_size, seed):
 
     return objective
 
-
-# pipeline 
 def run_pipeline(grid: int, seed: int, cytokine: str):
     set_seed(seed)
 
@@ -186,18 +177,18 @@ def run_pipeline(grid: int, seed: int, cytokine: str):
     out_dir   = Path("./models/sta_lstm")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    X = np.load(data_path / "X_lstm.npy").astype(np.float32)                    # (99,2,G,G,11)
-    Y = np.load(data_path / "Y_target.npy").astype(np.float32)[..., idx:idx+1]  # (99,G,G,1)
-    M = np.load(data_path / "Y_masks_spatial.npy").astype(np.float32)           # (99,G,G,5)
+    X = np.load(data_path / "X_lstm.npy").astype(np.float32)                    
+    Y = np.load(data_path / "Y_target.npy").astype(np.float32)[..., idx:idx+1]  
+    M = np.load(data_path / "Y_masks_spatial.npy").astype(np.float32)
 
     with open(data_path / "metadata.json") as f:
         meta = json.load(f)
     clip_max = float(meta["scaling"]["max"][idx])
 
-    X_train, Y_train = X[:80],   Y[:80]
-    X_val,   Y_val   = X[80:90], Y[80:90]
+    X_train, Y_train = X[:70],   Y[:70]
+    X_val,   Y_val   = X[70:80], Y[70:80]
 
-    # optuna search 
+    # optuna 
     print(f"\nOptuna [{cytokine.upper()}] {grid}x{grid} — "
           f"{N_TRIALS} trials × {TUNE_EPOCHS} epochs...")
 
@@ -215,7 +206,7 @@ def run_pipeline(grid: int, seed: int, cytokine: str):
     best = study.best_params
     print(f"  Best: {best}  |  val_loss = {study.best_value:.6f}")
 
-    # final training 
+    # final train 
     tf.keras.backend.clear_session()
     set_seed(seed)
 
@@ -246,7 +237,7 @@ def run_pipeline(grid: int, seed: int, cytokine: str):
         ],
     )
 
-    # eval
+    # eval 
     Y_p_scaled = model.predict(X, batch_size=2)
     Y_p_phys   = denormalize(Y_p_scaled, clip_max)
     Y_a_phys   = denormalize(Y,          clip_max)
