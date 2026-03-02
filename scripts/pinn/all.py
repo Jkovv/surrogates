@@ -22,12 +22,14 @@ N_DOMAIN        = 500    # PDE collocation points
 N_BOUNDARY      = 200    # Neumann BC points
 N_INITIAL       = 0      # IC enforced via PointSetBC, not sampled
 
+# true_size=5mm, nx=grid, s_mcs=60 MCS/h, h_mcs=1/60
 TRUE_SIZE = 5.0    # mm — physical domain size
 S_MCS     = 60.0   # MCS per hour
 H_MCS     = 1.0 / S_MCS
 
 CYTOKINE_NAMES  = ["il8", "il1", "il6", "il10", "tnf", "tgf"]
 
+# Cell-type index → column in Y_masks_pinn
 # masks order: EC(0), NN(1), NA(2), M1(3), M2(4)
 MASK_E   = 0   # EC  — endothelial
 MASK_NDN = 1   # NN  — neutrophil / ndn
@@ -41,8 +43,6 @@ def set_seed(seed):
     random.seed(seed); np.random.seed(seed); tf.random.set_seed(seed)
     dde.config.set_random_seed(seed)
 
-
-# PDE params 
 def compute_pde_params(G):
     areaconv   = TRUE_SIZE**2 / G**2
     volumeconv = (TRUE_SIZE**2 * 1.0) / (G**2 * 1.0)
@@ -105,19 +105,17 @@ def build_source_terms(masks_flat, D, k, sec, G):
         zeros, zeros, zeros,
         sec[7] * mm1,    # tnf:  M1 secondary secretion
         zeros,
-    ], axis=-1)        # (G*G, 6)
+    ], axis=-1)          # (G*G, 6)
 
     e = np.stack([
-        sec[2] * mna,  # il8:  NA endocytosis
+        sec[2] * mna,    # il8:  NA endocytosis
         zeros, zeros, zeros, zeros, zeros,
-    ], axis=-1) # (G*G, 6)
+    ], axis=-1)          # (G*G, 6)
 
     return (tf.constant(s1, dtype=tf.float64),
             tf.constant(s2, dtype=tf.float64),
             tf.constant(e,  dtype=tf.float64))
 
-
-# PDE res
 def make_pde(D_tf, k_tf, s1_tf, s2_tf, e_tf, G):
     G_tf = tf.constant(G, dtype=tf.float64)
 
@@ -125,7 +123,6 @@ def make_pde(D_tf, k_tf, s1_tf, s2_tf, e_tf, G):
         ftype = tf.float64
         G_dyn = tf.cast(G_tf, ftype)
 
-        # spatial Laplacian 
         lap = []
         for i in range(6):
             ui   = y[:, i:i+1]
@@ -134,13 +131,11 @@ def make_pde(D_tf, k_tf, s1_tf, s2_tf, e_tf, G):
             lap.append(d2x + d2y)
         laplacian_u = tf.concat(lap, axis=1)   # (N, 6)
 
-        # time derivative 
         ut = tf.concat([
             dde.grad.jacobian(y[:, i:i+1], x, i=0, j=2)
             for i in range(6)
-        ], axis=1) # (N, 6)
+        ], axis=1)                             # (N, 6)
 
-        # spatial source terms lookup (O(N)
         ix = tf.cast(tf.clip_by_value(
             tf.floor((x[:, 0:1] + tf.cast(1.0, ftype)) / tf.cast(2.0, ftype) * G_dyn),
             tf.cast(0.0, ftype), G_dyn - tf.cast(1.0, ftype)
@@ -149,7 +144,6 @@ def make_pde(D_tf, k_tf, s1_tf, s2_tf, e_tf, G):
             tf.floor((x[:, 1:2] + tf.cast(1.0, ftype)) / tf.cast(2.0, ftype) * G_dyn),
             tf.cast(0.0, ftype), G_dyn - tf.cast(1.0, ftype)
         ), tf.int32)                           # (N, 1)
-
         flat_idx = tf.squeeze(ix * tf.cast(G_tf, tf.int32) + iy, axis=1)  # (N,)
 
         s1_q = tf.cast(tf.gather(s1_tf, flat_idx), ftype)
@@ -158,14 +152,16 @@ def make_pde(D_tf, k_tf, s1_tf, s2_tf, e_tf, G):
         D_dyn = tf.cast(D_tf, ftype)
         k_dyn = tf.cast(k_tf, ftype)
 
-        # residual 
+        # res
         degradation = k_dyn * y
         endocytosis = e_q * y
         rhs = D_dyn * laplacian_u - degradation + s1_q + s2_q - endocytosis
-        return ut - rhs
+        return ut - rhs                        # (N, 6) — should be 0
 
     return pde
 
+
+# metrics 
 def calculate_metrics(y_true, y_pred, masks):
     T  = min(y_true.shape[0], y_pred.shape[0], masks.shape[0])
     yt = y_true[:T]; yp = np.maximum(y_pred[:T], 0.0)
@@ -213,6 +209,7 @@ def build_dde_model(G, hidden, n_layers, lr,
         for i in range(6)
     ]
 
+    # Observation constraints (training data)
     obs_bcs = [
         dde.PointSetBC(X_obs, Y_obs[:, i:i+1], component=i)
         for i in range(6)
@@ -232,7 +229,10 @@ def build_dde_model(G, hidden, n_layers, lr,
         "tanh", "Glorot uniform"
     )
     net.apply_output_transform(lambda x, y: tf.nn.softplus(y) - 1.0)
+    # softplus(y)-1 → output ≈ 0 at y=0, allows negative values near 0
+    # (cytokines scaled to [-1,1] so negative is valid)
 
+    # Loss weights: [pde, bc×6, ic×6, obs×6]
     n_pde = 1
     n_bc  = 6
     n_ic  = 6
@@ -248,7 +248,8 @@ def build_dde_model(G, hidden, n_layers, lr,
     model.compile("adam", lr=lr, loss_weights=loss_weights)
     return model
 
-# optuna
+
+# Optuna 
 def make_objective(G, pde_fn, geomtime, X_ic, Y_ic_obs,
                    X_obs_tr, Y_obs_tr, X_obs_vl, Y_obs_vl,
                    arrays_phys, val_times, bc_fn, seed):
@@ -272,12 +273,13 @@ def make_objective(G, pde_fn, geomtime, X_ic, Y_ic_obs,
         )
         model.train(iterations=TUNE_ITERS, display_every=0)
 
+        # Validation MSE over all val timesteps
         xy_grid = make_xy_grid(G)
         mses = []
         for t in val_times:
             tt   = np.full((xy_grid.shape[0], 1), t_to_norm(t, G), np.float64)
             X_q  = np.hstack([xy_grid, tt])
-            Yp   = model.predict(X_q)
+            Yp   = model.predict(X_q)                    # (G*G, 6)
             Yt   = arrays_phys[t].reshape(-1, 6).astype(np.float64)
             mses.append(float(np.mean((Yt - Yp)**2)))
         return float(np.mean(mses))
@@ -287,11 +289,12 @@ def make_xy_grid(G):
     xs = np.linspace(-1.0, 1.0, G, dtype=np.float64)
     ys = np.linspace(-1.0, 1.0, G, dtype=np.float64)
     xx, yy = np.meshgrid(xs, ys, indexing="ij")
-    return np.stack([xx.ravel(), yy.ravel()], axis=1) 
+    return np.stack([xx.ravel(), yy.ravel()], axis=1)  # (G*G, 2)
 
 def t_to_norm(t_idx, n_total=101, window=2):
     t_norm_all = np.linspace(-1.0, 1.0, n_total, dtype=np.float64)
     return float(t_norm_all[t_idx + window])
+
 
 def run_pipeline(grid, seed, cytokine):
     set_seed(seed)
@@ -302,12 +305,12 @@ def run_pipeline(grid, seed, cytokine):
 
     print(f"\n[{cytokine.upper()}] {grid}×{grid} — loading data...")
 
-    Y_raw   = np.load(data_path/"Y_raw_phys.npy").astype(np.float64)   
-    Y_tgt   = np.load(data_path/"Y_target.npy").astype(np.float64)   
-    M_spat  = np.load(data_path/"Y_masks_spatial.npy").astype(np.float64)
-    M_pinn  = np.load(data_path/"Y_masks_pinn.npy").astype(np.float64)  
-    Y_ic_raw= np.load(data_path/"Y_ic.npy").astype(np.float64)          
-    X_col   = np.load(data_path/"X_colloc.npy").astype(np.float64)      
+    Y_raw   = np.load(data_path/"Y_raw_phys.npy").astype(np.float64)   # (101,G,G,6)
+    Y_tgt   = np.load(data_path/"Y_target.npy").astype(np.float64)     # (99,G,G,6)
+    M_spat  = np.load(data_path/"Y_masks_spatial.npy").astype(np.float64) # (99,G,G,5)
+    M_pinn  = np.load(data_path/"Y_masks_pinn.npy").astype(np.float64)  # (99,G*G,5)
+    Y_ic_raw= np.load(data_path/"Y_ic.npy").astype(np.float64)          # (G,G,6) scaled
+    X_col   = np.load(data_path/"X_colloc.npy").astype(np.float64)      # (99,G*G,3)
 
     with open(data_path/"metadata.json") as f:
         meta = json.load(f)
@@ -315,12 +318,13 @@ def run_pipeline(grid, seed, cytokine):
     clip_max  = clip_maxs[cyt_idx]
 
     G  = grid
-    N  = Y_tgt.shape[0] 
+    N  = Y_tgt.shape[0]    # 99
     G2 = G * G
 
-    # pde
+    # PDE setup 
     D_arr, k_arr, sec_arr = compute_pde_params(G)
-    masks_mean = M_pinn[:70].mean(axis=0)   
+    # mean mask over training timesteps for steady spatial source terms
+    masks_mean = M_pinn[:70].mean(axis=0)  
     s1_tf, s2_tf, e_tf = build_source_terms(masks_mean, D_arr, k_arr, sec_arr, G)
 
     D_tf = tf.constant(D_arr.reshape(1, 6), dtype=tf.float64)
@@ -332,7 +336,7 @@ def run_pipeline(grid, seed, cytokine):
     pde_fn = make_pde(D_tf, k_tf, s1_tf, s2_tf, e_tf, G)
 
     t_norm_all = np.linspace(-1.0, 1.0, 101, dtype=np.float64)
-    t_min = float(t_norm_all[2]) 
+    t_min = float(t_norm_all[2])   
     t_max = float(t_norm_all[-1])
 
     geom      = dde.geometry.Rectangle([-1.0, -1.0], [1.0, 1.0])
@@ -342,12 +346,14 @@ def run_pipeline(grid, seed, cytokine):
     def bc_fn(x, on_boundary):
         return on_boundary
 
+    # IC constraints 
     tt0 = np.full((G2, 1), t_min, dtype=np.float64)
-    X_ic     = np.hstack([xy_grid, tt0])                     
-    Y_ic_obs = Y_ic_raw.reshape(G2, 6).astype(np.float64)    
+    X_ic     = np.hstack([xy_grid, tt0])                     # (G*G, 3)
+    Y_ic_obs = Y_ic_raw.reshape(G2, 6).astype(np.float64)    # (G*G, 6)
 
+    # obs constraints 
     rng = np.random.default_rng(seed)
-    train_indices = list(range(70))    
+    train_indices = list(range(70))     # Y_tgt index 0..69
     val_indices   = list(range(70, 80))
 
     X_obs_list_tr = []; Y_obs_list_tr = []
@@ -358,8 +364,8 @@ def run_pipeline(grid, seed, cytokine):
         X_obs_list_tr.append(np.hstack([xy_obs, t_obs]))
         Y_obs_list_tr.append(Y_tgt[i].reshape(G2, 6)[pts_idx])
 
-    X_obs_tr = np.vstack(X_obs_list_tr).astype(np.float64) 
-    Y_obs_tr = np.vstack(Y_obs_list_tr).astype(np.float64) 
+    X_obs_tr = np.vstack(X_obs_list_tr).astype(np.float64)  # (80*N_OBS, 3)
+    Y_obs_tr = np.vstack(Y_obs_list_tr).astype(np.float64)  # (80*N_OBS, 6)
 
     X_obs_list_vl = []; Y_obs_list_vl = []
     for i in val_indices:
@@ -375,7 +381,7 @@ def run_pipeline(grid, seed, cytokine):
     print(f"  Train obs: {X_obs_tr.shape[0]}  |  Val obs: {X_obs_vl.shape[0]}")
     print(f"  IC points: {X_ic.shape[0]}  |  Grid: {G}×{G}={G2}")
 
-    # optuna
+    # optuna 
     print(f"Optuna: {N_TRIALS} trials × {TUNE_ITERS} iters...")
     arrays_phys = Y_raw  
 
@@ -398,6 +404,7 @@ def run_pipeline(grid, seed, cytokine):
     best = study.best_params
     print(f"  Best: {best}  |  val_loss = {study.best_value:.6f}")
 
+    # final training 
     tf.keras.backend.clear_session(); set_seed(seed)
     model = build_dde_model(
         G, best["hidden"], best["n_layers"], best["learning_rate"],
@@ -418,8 +425,8 @@ def run_pipeline(grid, seed, cytokine):
         X_q = np.hstack([xy_grid, tt])
         Yp_all[i] = model.predict(X_q).reshape(G, G, 6)
 
-    Y_phys  = denormalize(Y_tgt[..., cyt_idx:cyt_idx+1], clip_max)  
-    Yp_phys = denormalize(Yp_all[..., cyt_idx:cyt_idx+1], clip_max)  
+    Y_phys  = denormalize(Y_tgt[..., cyt_idx:cyt_idx+1], clip_max)   # (99,G,G,1)
+    Yp_phys = denormalize(Yp_all[..., cyt_idx:cyt_idx+1], clip_max)  # (99,G,G,1)
 
     # eval
     suffix  = f"{cytokine}_{grid}_{seed}"
@@ -438,20 +445,15 @@ def run_pipeline(grid, seed, cytokine):
     with open(out_dir/f"res_{suffix}.json", "w") as f:
         json.dump(results, f, indent=4)
 
+
     model.save(str(out_dir/f"weights_{suffix}"))
     print(f"DONE → models/pinn/res_{suffix}.json")
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--grid",     type=int, default=None)
+    ap.add_argument("--grid",     type=int, required=True)
     ap.add_argument("--cytokine", type=str, required=True)
     ap.add_argument("--seed",     type=int, default=42)
     args = ap.parse_args()
-
-    if args.grid:
-        run_pipeline(args.grid, args.seed, args.cytokine)
-    else:
-        for d in sorted(Path("./preprocessed").iterdir()):
-            if d.is_dir():
-                run_pipeline(int(d.name.split("x")[0]), args.seed, args.cytokine)
+    run_pipeline(args.grid, args.seed, args.cytokine)
