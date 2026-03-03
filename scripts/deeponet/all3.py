@@ -14,7 +14,7 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 N_TRIALS    = 20
 TUNE_EPOCHS = 30
 FULL_EPOCHS = 400
-EVAL_CHUNK  = 4096   # points per trunk forward pass at eval
+EVAL_CHUNK  = 4096  
 
 
 def set_seed(seed):
@@ -22,7 +22,8 @@ def set_seed(seed):
     random.seed(seed); np.random.seed(seed); tf.random.set_seed(seed)
 
 
-# Branch 
+# branch 
+
 class Branch(tf.keras.layers.Layer):
     def __init__(self, hidden, p, **kw):
         super().__init__(**kw)
@@ -32,7 +33,8 @@ class Branch(tf.keras.layers.Layer):
     def call(self, x, training=False):
         return self.fc2(self.fc1(x))
 
-# Trunk 
+
+# trunk 
 class Trunk(tf.keras.layers.Layer):
     def __init__(self, hidden, p, **kw):
         super().__init__(**kw)
@@ -50,8 +52,6 @@ class Trunk(tf.keras.layers.Layer):
         h = self.W2b(self.W2a(h));  h = h * u + (1.0 - h) * v
         return self.out(h)
 
-
-# DeepONet 
 class DeepONet(tf.keras.Model):
     def __init__(self, hidden, p):
         super().__init__()
@@ -62,17 +62,15 @@ class DeepONet(tf.keras.Model):
 
     def call(self, inputs, training=False):
         xb, xt = inputs
-        b = self.branch(xb, training=training)         # (batch, p)
-        t = self.trunk(xt)                             # (batch, n_pts, p)
+        b = self.branch(xb, training=training) # (batch,p)
+        t = self.trunk(xt) # (batch, n_pts, p)
         r = tf.einsum("bp,bnp->bn", b, t) + self.bias # (batch, n_pts)
-        return tf.expand_dims(r, -1)                   # (batch, n_pts, 1)
+        return tf.expand_dims(r, -1) # (batch, n_pts, 1)
 
-
-# Data  
-  def build_branch_inputs(Xb, Xt, cyt_idx):
+def build_branch_inputs(Xb, Xt, cyt_idx):
     N, _, G, _, _ = Xb.shape
-    f0   = Xb[:, 0, :, :, cyt_idx]               # (N, G, G) cytokine frame 0
-    mask = (Xb[:, 0, :, :, 6:].max(axis=-1) > 0.5).astype(np.float32)  # (N,G,G)
+    f0   = Xb[:, 0, :, :, cyt_idx] # (N, G, G) cytokine frame 0
+    mask = (Xb[:, 0, :, :, 6:].max(axis=-1) > 0.5).astype(np.float32) # (N,G,G)
 
     xs = np.linspace(0, 1, G, dtype=np.float32)
     ys = np.linspace(0, 1, G, dtype=np.float32)
@@ -81,24 +79,22 @@ class DeepONet(tf.keras.Model):
     out = np.zeros((N, 7), dtype=np.float32)
     for i in range(N):
         f  = f0[i]; m = mask[i]; na = float(np.sum(m)) + 1e-6
-        out[i, 0] = (float(np.max(f))  + 1.0) / 2.0   # max_f0   → [0,1]
-        out[i, 1] = (float(np.mean(f)) + 1.0) / 2.0   # mean_f0  → [0,1]
-        out[i, 2] = float(np.std(f))                   # std_f0   ∈ [0,1]
-        out[i, 3] = float(np.sum(xx * m) / na)         # centroid_x
-        out[i, 4] = float(np.sum(yy * m) / na)         # centroid_y
-        out[i, 5] = na / (G * G)                       # extent
-        out[i, 6] = float(Xt[i, 0, 2])                 # t_norm (same for all pts)
+        out[i, 0] = (float(np.max(f))  + 1.0) / 2.0 # max_f0   → [0,1]
+        out[i, 1] = (float(np.mean(f)) + 1.0) / 2.0 # mean_f0  → [0,1]
+        out[i, 2] = float(np.std(f)) # std_f0   ∈ [0,1]
+        out[i, 3] = float(np.sum(xx * m) / na) # centroid_x
+        out[i, 4] = float(np.sum(yy * m) / na) # centroid_y
+        out[i, 5] = na / (G * G) # extent
+        out[i, 6] = float(Xt[i, 0, 2]) # t_norm (same for all pts)
     return out
 
 
 def build_trunk_inputs(Xb, Xt):
     N, _, G, _, C = Xb.shape
     vals = Xb.transpose(0, 2, 3, 1, 4).reshape(N, G*G, 22).astype(np.float32)
-    xy   = Xt[:, :, :2].astype(np.float32)              # (N, G*G, 2)
-    return np.concatenate([xy, vals], axis=-1)            # (N, G*G, 24)
+    xy   = Xt[:, :, :2].astype(np.float32) # (N, G*G, 2)
+    return np.concatenate([xy, vals], axis=-1) # (N, G*G, 24)
 
-
-#  Dataset 
 def build_dataset(Xbranch, Xtrunk, Yf, batch_size, chunk_size, shuffle=True):
     N, n_pts, _ = Xtrunk.shape
     chunks = list(range(0, n_pts, chunk_size))
@@ -108,12 +104,12 @@ def build_dataset(Xbranch, Xtrunk, Yf, batch_size, chunk_size, shuffle=True):
         if shuffle:
             np.random.shuffle(order)
         for i in order:
-            xb = Xbranch[i]                               # (7,)
+            xb = Xbranch[i]                             
             for s in chunks:
                 e    = min(s + chunk_size, n_pts)
                 size = e - s
-                xt = Xtrunk[i, s:e]                       # (size, 24)
-                y  = Yf[i, s:e]                           # (size, 1)
+                xt = Xtrunk[i, s:e]                   
+                y  = Yf[i, s:e]                        
                 if size < chunk_size:
                     pad = chunk_size - size
                     xt = np.concatenate([xt, np.zeros((pad, 24), np.float32)], axis=0)
@@ -130,9 +126,7 @@ def build_dataset(Xbranch, Xtrunk, Yf, batch_size, chunk_size, shuffle=True):
     return (tf.data.Dataset.from_generator(gen, output_signature=sig)
             .batch(batch_size).prefetch(tf.data.AUTOTUNE))
 
-# Training 
 def masked_mse(pred, y, sz):
-    """MSE over first sz real points only — ignores zero-padding of last chunk."""
     idx  = tf.range(tf.shape(pred)[1])[tf.newaxis, :, tf.newaxis]
     mask = tf.cast(idx < tf.cast(sz[:, tf.newaxis, :], tf.int32), tf.float32)
     return tf.reduce_sum(tf.square(pred - y) * mask) / (tf.reduce_sum(mask) + 1e-8)
@@ -146,7 +140,6 @@ def train_step(model, opt, xb, xt, sz, y):
 
 def val_step(model, xb, xt, sz, y):
     return float(masked_mse(model([xb, xt], training=False), y, sz))
-
 
 def train_model(model, opt, ds_tr, ds_vl,
                 epochs, patience=40, reduce_patience=15, min_lr=1e-7,
@@ -176,18 +169,17 @@ def train_model(model, opt, ds_tr, ds_vl,
     return best_val
 
 
-# eval 
+# eval
 def predict_full(model, Xbranch, Xtrunk, chunk=EVAL_CHUNK):
     N, n_pts, _ = Xtrunk.shape
     out = np.zeros((N, n_pts, 1), np.float32)
     for i in range(N):
-        xb = tf.constant(Xbranch[i:i+1])               # (1, 7)
+        xb = tf.constant(Xbranch[i:i+1]) # (1, 7)
         for s in range(0, n_pts, chunk):
             e = min(s + chunk, n_pts)
-            xt = tf.constant(Xtrunk[i:i+1, s:e])       # (1, e-s, 24)
+            xt = tf.constant(Xtrunk[i:i+1, s:e]) # (1, e-s, 24)
             out[i, s:e] = model([xb, xt], training=False).numpy()[0]
     return out
-
 
 # metrics 
 def calculate_metrics(y_true, y_pred, masks):
@@ -241,8 +233,6 @@ def make_objective(Xbr_tr, Xtr_tr, Yf_tr,
         return float(best)
     return objective
 
-
-# pipeline 
 def run_pipeline(grid, seed, cytokine):
     set_seed(seed)
     cyt_names = ["il8", "il1", "il6", "il10", "tnf", "tgf"]
@@ -264,16 +254,16 @@ def run_pipeline(grid, seed, cytokine):
     N = Xb.shape[0]; G2 = Xt.shape[1]; G = int(round(G2**0.5))
     Yf = Y.reshape(N, G2, 1)
 
-    Xbranch = build_branch_inputs(Xb, Xt, idx)   # (N, 7)
-    Xtrunk  = build_trunk_inputs(Xb, Xt)          # (N, G*G, 24)
+    Xbranch = build_branch_inputs(Xb, Xt, idx)  
+    Xtrunk  = build_trunk_inputs(Xb, Xt)   
 
     print(f"  Branch input: (N, 7) scalars  |  Trunk input: (N, {G2}, 24)")
-    print(f"  Full grid per epoch: {G2} pts × {N} samples — no subsampling")
+    print(f"  Full grid per epoch: {G2} pts × {N} samples - no subsampling")
 
-    Xbr_tr, Xtr_tr, Yf_tr = Xbranch[:80],   Xtrunk[:80],   Yf[:80]
-    Xbr_vl, Xtr_vl, Yf_vl = Xbranch[80:90], Xtrunk[80:90], Yf[80:90]
-    
-  # Optuna
+    # 70/10/20
+    Xbr_tr, Xtr_tr, Yf_tr = Xbranch[:70],   Xtrunk[:70],   Yf[:70]
+    Xbr_vl, Xtr_vl, Yf_vl = Xbranch[70:80], Xtrunk[70:80], Yf[70:80]
+
     print(f"Optuna: {N_TRIALS} trials × {TUNE_EPOCHS} epochs...")
     study = optuna.create_study(
         direction="minimize",
@@ -287,7 +277,7 @@ def run_pipeline(grid, seed, cytokine):
     best = study.best_params
     print(f"  Best: {best}  |  val_loss = {study.best_value:.6f}")
 
-    # final training 
+    #final training 
     tf.keras.backend.clear_session(); set_seed(seed)
     ds_tr = build_dataset(Xbr_tr, Xtr_tr, Yf_tr,
                           best["batch_size"], best["chunk_size"], shuffle=True)
@@ -322,7 +312,6 @@ def run_pipeline(grid, seed, cytokine):
         json.dump(results, f, indent=4)
     model.save_weights(out_dir/f"weights_{suffix}.weights.h5")
     print(f"DONE → models/deeponet_h/res_{suffix}.json")
-
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
