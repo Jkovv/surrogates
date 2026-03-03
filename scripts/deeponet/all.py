@@ -288,7 +288,6 @@ def run_pipeline(grid, seed, cytokine):
     model.save_weights(out_dir/f"weights_{suffix}.weights.h5")
     print(f"DONE: {suffix}")
 
-
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--grid",     type=int, default=None)
@@ -302,3 +301,4 @@ if __name__ == "__main__":
         for d in sorted(Path("./preprocessed").iterdir()):
             if d.is_dir():
                 run_pipeline(int(d.name.split("x")[0]), args.seed, args.cytokine)
+
