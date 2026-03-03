@@ -21,9 +21,7 @@ def set_seed(seed):
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed); np.random.seed(seed); tf.random.set_seed(seed)
 
-
 # branch 
-
 class Branch(tf.keras.layers.Layer):
     def __init__(self, hidden, p, **kw):
         super().__init__(**kw)
