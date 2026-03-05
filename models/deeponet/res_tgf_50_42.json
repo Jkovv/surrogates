@@ -1,0 +1,29 @@
+{
+    "grid": 50,
+    "seed": 42,
+    "cytokine": "tgf",
+    "best_params": {
+        "p": 64,
+        "hidden": 256,
+        "learning_rate": 0.0009951965449831017,
+        "batch_size": 8,
+        "chunk_size": 2048
+    },
+    "optuna_best_val_loss": 0.00738533182690541,
+    "results": {
+        "Interpolation_72_89": {
+            "Global_R2": 0.9713971056475709,
+            "Masked_RMSE": 1.97793245964414e-08,
+            "Avg_Dice": 0.9765695962574008,
+            "Spatial_Correlation": 0.985471055380072,
+            "SSIM": 0.9829096333105846
+        },
+        "Extrapolation_82_100": {
+            "Global_R2": 0.9719811124171098,
+            "Masked_RMSE": 2.4816694541220087e-08,
+            "Avg_Dice": 0.9720848817599841,
+            "Spatial_Correlation": 0.9859949456845404,
+            "SSIM": 0.9833063394805373
+        }
+    }
+}
