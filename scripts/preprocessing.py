@@ -21,14 +21,12 @@ GPR_MAX_GRID = 100
 
 def adaptive_clip_percentile(channel: np.ndarray) -> float:
     """
-    Select clip percentile from excess kurtosis of the raw channel.
-
-    Thresholds derived from EDA (eda_stats.csv):
-        kurtosis <  20  →  100.0 %   (raw MinMax — IL-8 all resolutions)
+    Thresholds:
+        kurtosis <  20  →  100.0 %   (raw MinMax - IL-8 all resolutions)
         kurtosis < 100  →   99.5 %
         kurtosis < 300  →   99.0 %
         kurtosis < 600  →   98.5 %
-        kurtosis >= 600 →   98.0 %   (IL-6 / IL-10 @ 500x500)
+        kurtosis >= 600 →   98.0 %   (IL-6 / IL-10 at 500x500)
     """
     flat = channel.flatten().astype(np.float64)
     if len(flat) < 4 or flat.std() < 1e-30:
@@ -66,9 +64,6 @@ def extract_grid_size(name: str):
         return int(m.group(1))
     m = re.search(r'(\d+)', name)
     return int(m.group(1)) if m else None
-
-
-# main processing
 
 def process_grid(folder_name: str):
     data_path = BASE_LATTICE_DIR / folder_name
@@ -176,10 +171,8 @@ def process_grid(folder_name: str):
     Y_ic = scaled[0].astype(np.float32)
     np.save(out_path / "Y_ic.npy", Y_ic)
 
-    # Y_bc_mask: 1 on the outer ring of the grid (domain boundary), 0 inside
-    # Used to enforce Neumann no-flux boundary conditions:
-    #   ∂u/∂n = 0  on the boundary (matching ABM Neumann BCs)
-    # Shape: (G, G)
+    # Y_bc_mask - Used to enforce Neumann no-flux boundary conditions:
+    # ∂u/∂n = 0  on the boundary (matching ABM Neumann BCs)
     bc_mask = np.zeros((G, G), dtype=np.float32)
     bc_mask[0, :]  = 1.0
     bc_mask[-1, :] = 1.0
@@ -198,7 +191,7 @@ def process_grid(folder_name: str):
     else:
         gpr_note = f"X_gpr skipped (G={G} > {GPR_MAX_GRID})"
 
-    # Metadata
+    # metadata
     meta = {
         "grid":        G,
         "n_timesteps": N_TIMESTEPS,
@@ -215,17 +208,17 @@ def process_grid(folder_name: str):
             "denorm":          "u_phys = (u_scaled + 1) / 2 * max[j]",
         },
         "files": {
-            "Y_raw_phys":      "(101,G,G,6) raw physical — PINN/PI-DeepONet PDE residuals",
-            "Y_target":        "(99,G,G,6)  scaled targets — all models",
-            "Y_masks_spatial": "(99,G,G,5)  cell-type masks — eval + loss weighting",
-            "Y_masks_pinn":    "(99,G*G,5)  masks flattened — PINN/PI-DeepONet",
-            "X_lstm":          "(99,2,G,G,11) cytokine+mask seq — STA-LSTM",
-            "X_branch":        "(99,2,G,G,11) cytokine+mask seq — DeepONet/PI-DeepONet branch",
-            "X_trunk":         "(99,G*G,3)  (x,y,t) coords — DeepONet/PI-DeepONet trunk",
-            "X_colloc":        "(99,G*G,3)  collocation pts — PINN/PI-DeepONet",
-            "Y_ic":            "(G,G,6)     initial condition — PINN",
-            "Y_bc_mask":       "(G,G)       boundary mask — PINN Neumann BCs",
-            "X_gpr":           "(99,G*G*11) flat features — GPR (G<=100 only)",
+            "Y_raw_phys":      "(101,G,G,6) raw physical - PINN/PI-DeepONet PDE residuals",
+            "Y_target":        "(99,G,G,6)  scaled targets - all models",
+            "Y_masks_spatial": "(99,G,G,5)  cell-type masks - eval + loss weighting",
+            "Y_masks_pinn":    "(99,G*G,5)  masks flattened - PINN/PI-DeepONet",
+            "X_lstm":          "(99,2,G,G,11) cytokine+mask seq - STA-LSTM",
+            "X_branch":        "(99,2,G,G,11) cytokine+mask seq - DeepONet/PI-DeepONet branch",
+            "X_trunk":         "(99,G*G,3)  (x,y,t) coords - DeepONet/PI-DeepONet trunk",
+            "X_colloc":        "(99,G*G,3)  collocation pts - PINN/PI-DeepONet",
+            "Y_ic":            "(G,G,6)     initial condition - PINN",
+            "Y_bc_mask":       "(G,G)       boundary mask - PINN Neumann BCs",
+            "X_gpr":           "(99,G*G*11) flat features - GPR (G<=100 only)",
         },
     }
     with open(out_path / "metadata.json", "w") as f:
