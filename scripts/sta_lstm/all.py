@@ -98,8 +98,7 @@ class STALSTM(tf.keras.Model):
         return self.out_resize(h)     
 
 
-# ── Metrics (fixed per scientific rigor report) ──────────────────────────────
-
+# metrics 
 def _fisher_z(r):
     r = np.clip(r, -0.9999, 0.9999)
     return 0.5 * np.log((1.0 + r) / (1.0 - r))
@@ -109,21 +108,13 @@ def _inv_fisher_z(z):
 
 def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
                       masks: np.ndarray, clip_max: float) -> dict:
-    """
-    Fixed metrics:
-      Bug 2:    Dice skips empty fields instead of returning 1.0
-      Issue 12: Fisher z-transform for correlation averaging
-      Issue 13: Fixed physical Dice threshold from clip_max
-      Issue 14: Per-timestep R²
-      Issue 15: Fixed SSIM data_range from clip_max
-      Issue 16: Both masked and unmasked RMSE
-    """
+
     min_t = min(y_true.shape[0], y_pred.shape[0], masks.shape[0])
     y_t   = y_true[:min_t]
     y_p   = np.maximum(y_pred[:min_t], 0.0)
     m_s   = np.max(masks[:min_t], axis=-1, keepdims=True)
 
-    # RMSE: masked + unmasked (Issue 16)
+    # RMSE: masked + unmasked 
     sq_diff = np.square(y_t - y_p)
     rmse    = float(np.sqrt(np.sum(sq_diff * m_s) / (np.sum(m_s) + 1e-12)))
     unmasked_rmse = float(np.sqrt(np.mean(sq_diff)))
@@ -131,7 +122,7 @@ def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
     # Global R²
     r2 = float(r2_score(y_t.flatten(), y_p.flatten()))
 
-    # Per-timestep R² (Issue 14)
+    # Per-timestep R² 
     per_t_r2 = []
     for t in range(min_t):
         gt_f = y_t[t].flatten(); pr_f = y_p[t].flatten()
@@ -140,12 +131,12 @@ def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
         else:
             per_t_r2.append(np.nan)
 
-    # Dice with fixed threshold + empty-field handling (Bug 2, Issue 13)
+    # Dice with fixed threshold + empty-field handling 
     dice_thr = 0.05 * clip_max if clip_max > 0 else 1e-9
     dices, n_empty = [], 0
-    # Spatial correlation with Fisher z (Issue 12)
+    # Spatial correlation with Fisher z 
     z_corrs = []
-    # SSIM with fixed data_range (Issue 15)
+    # SSIM with fixed data_range 
     ssims, n_ssim_skip = [], 0
     fixed_dr = float(clip_max) if clip_max > 0 else 1.0
 
@@ -157,13 +148,13 @@ def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
         g_b = (gt > dice_thr).astype(float)
         p_b = (pr > dice_thr).astype(float)
         if np.sum(g_b) + np.sum(p_b) == 0:
-            n_empty += 1  # Bug 2: skip, don't append 1.0
+            n_empty += 1 
         else:
             dices.append(
                 (2.0 * np.sum(g_b * p_b)) / (np.sum(g_b) + np.sum(p_b) + 1e-12)
             )
 
-        # Spatial correlation
+        # spatial correlation
         if np.std(gt) > 1e-12 and np.std(pr) > 1e-12:
             r_val = float(pearsonr(gt.flatten(), pr.flatten())[0])
             if np.isfinite(r_val):
@@ -241,10 +232,9 @@ def run_pipeline(grid: int, seed: int, cytokine: str):
         meta = json.load(f)
     clip_max = float(meta["scaling"]["max"][idx])
 
-    # ── Bug 3 fix: non-overlapping train / val / test splits ──
     # Train: samples 0–69  (t=2..71)
-    # Val:   samples 70–79 (t=72..81) — used for HP tuning only
-    # Test:  samples 80–98 (t=82..100) — never seen during training or tuning
+    # Val:   samples 70–79 (t=72..81) - used for HP tuning only
+    # Test:  samples 80–98 (t=82..100) - never seen during training or tuning
     X_train, Y_train = X[:70],   Y[:70]
     X_val,   Y_val   = X[70:80], Y[70:80]
 
@@ -297,17 +287,15 @@ def run_pipeline(grid: int, seed: int, cytokine: str):
         ],
     )
 
-    # ── Evaluation (Bug 3 + Issue 11 fix) ──
-    # Predict on ALL samples for analysis, but evaluate on non-overlapping windows
+    # evaluation 
     Y_p_scaled = model.predict(X, batch_size=2)
     Y_p_phys   = denormalize(Y_p_scaled, clip_max)
     Y_a_phys   = denormalize(Y,          clip_max)
 
     suffix  = f"{cytokine}_{grid}_{seed}"
 
-    # Bug 3 fix: evaluation windows that do NOT include validation data
-    # Near-horizon: samples 80–89 (t=82–91) — immediately after validation
-    # Far-horizon:  samples 90–98 (t=92–100) — furthest from training
+    # Near-horizon: samples 80–89 (t=82–91) - immediately after validation
+    # Far-horizon:  samples 90–98 (t=92–100) - furthest from training
     results = {
         "grid":                 grid,
         "seed":                 seed,
