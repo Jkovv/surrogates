@@ -58,10 +58,8 @@ def build_source_arrays(masks_mean, sec, cyt_idx, G, clip_max):
     mm2 = masks_mean[:, MASK_M2]
     z   = np.zeros(n, np.float64)
 
-    # ── Bug 1 fix: IL-10 (index 3) source uses mm2, not mm1 ──
     # sec[5] = km2il10 → M2 macrophage secretion for IL-10
     s1_map = [sec[0]*me, sec[3]*mna, sec[4]*mm1, sec[5]*mm2, sec[6]*mna, sec[8]*mm2]
-    #                                             ^^^ FIXED: was mm1, now mm2
     s2_map = [sec[1]*mnn, z, z, z, sec[7]*mm1, z]
     e_map  = [sec[2]*mna, z, z, z, z, z]
 
@@ -402,8 +400,7 @@ def predict_full(model, Xbranch, Xtrunk, chunk=EVAL_CHUNK):
     return out
 
 
-# ── Metrics (fixed per scientific rigor report) ──────────────────────────────
-
+# metrics 
 def _fisher_z(r):
     r = np.clip(r, -0.9999, 0.9999)
     return 0.5 * np.log((1.0 + r) / (1.0 - r))
@@ -581,7 +578,6 @@ def run_pipeline(grid, seed, cytokine):
     Y_phys  = denormalize(Y.reshape(N, G, G, 1), clip_max)
     Yp_phys = denormalize(Yp, clip_max)
 
-    # ── Bug 3 + Issue 11 fix: non-overlapping test windows ──
     suffix  = f"{cytokine}_{grid}_{seed}"
     results = {
         "grid": grid, "seed": seed, "cytokine": cytokine,
@@ -616,3 +612,4 @@ if __name__ == "__main__":
         for d in sorted(Path("./preprocessed").iterdir()):
             if d.is_dir():
                 run_pipeline(int(d.name.split("x")[0]), args.seed, args.cytokine)
+
