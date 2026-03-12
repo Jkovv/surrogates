@@ -26,8 +26,7 @@ def set_seed(seed: int):
     tf.random.set_seed(seed)
 
 
-# ── Model ────────────────────────────────────────────────────────────────────
-
+# model 
 def _conv_block(x, filters, kernel_size=3):
     x = tf.keras.layers.Conv2D(
         filters, kernel_size, padding="same", activation="relu"
@@ -94,8 +93,7 @@ def build_unet(grid_size: int, in_channels: int = 22,
     return tf.keras.Model(inputs, outputs, name="unet")
 
 
-# ── Metrics (fixed per scientific rigor report) ──────────────────────────────
-
+# metrics 
 def _fisher_z(r):
     r = np.clip(r, -0.9999, 0.9999)
     return 0.5 * np.log((1.0 + r) / (1.0 - r))
@@ -105,21 +103,12 @@ def _inv_fisher_z(z):
 
 def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
                       masks: np.ndarray, clip_max: float) -> dict:
-    """
-    Fixed metrics:
-      Bug 2:    Dice skips empty fields instead of returning 1.0
-      Issue 12: Fisher z-transform for correlation averaging
-      Issue 13: Fixed physical Dice threshold from clip_max
-      Issue 14: Per-timestep R²
-      Issue 15: Fixed SSIM data_range from clip_max
-      Issue 16: Both masked and unmasked RMSE
-    """
     min_t = min(y_true.shape[0], y_pred.shape[0], masks.shape[0])
     y_t   = y_true[:min_t]
     y_p   = np.maximum(y_pred[:min_t], 0.0)
     m_s   = np.max(masks[:min_t], axis=-1, keepdims=True)
 
-    # RMSE: masked + unmasked (Issue 16)
+    # RMSE: masked + unmasked 
     sq_diff = np.square(y_t - y_p)
     rmse    = float(np.sqrt(np.sum(sq_diff * m_s) / (np.sum(m_s) + 1e-12)))
     unmasked_rmse = float(np.sqrt(np.mean(sq_diff)))
@@ -127,7 +116,7 @@ def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
     # Global R²
     r2 = float(r2_score(y_t.flatten(), y_p.flatten()))
 
-    # Per-timestep R² (Issue 14)
+    # Per-timestep R² 
     per_t_r2 = []
     for t in range(min_t):
         gt_f = y_t[t].flatten(); pr_f = y_p[t].flatten()
@@ -136,12 +125,12 @@ def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
         else:
             per_t_r2.append(np.nan)
 
-    # Dice with fixed threshold + empty-field handling (Bug 2, Issue 13)
+    # Dice with fixed threshold + empty-field handling 
     dice_thr = 0.05 * clip_max if clip_max > 0 else 1e-9
     dices, n_empty = [], 0
-    # Spatial correlation with Fisher z (Issue 12)
+    # Spatial correlation with Fisher z 
     z_corrs = []
-    # SSIM with fixed data_range (Issue 15)
+    # SSIM with fixed data_range 
     ssims, n_ssim_skip = [], 0
     fixed_dr = float(clip_max) if clip_max > 0 else 1.0
 
@@ -190,7 +179,7 @@ def denormalize(scaled: np.ndarray, clip_max: float) -> np.ndarray:
     return (np.asarray(scaled, dtype=np.float64) + 1.0) / 2.0 * clip_max
 
 
-# ── Optuna ───────────────────────────────────────────────────────────────────
+# Optuna 
 
 def make_objective(X_train, Y_train, X_val, Y_val, grid_size, seed):
     def objective(trial):
@@ -226,7 +215,7 @@ def make_objective(X_train, Y_train, X_val, Y_val, grid_size, seed):
     return objective
 
 
-# ── Pipeline ─────────────────────────────────────────────────────────────────
+# pipeline 
 
 def run_pipeline(grid: int, seed: int, cytokine: str):
     set_seed(seed)
