@@ -58,7 +58,10 @@ def build_source_arrays(masks_mean, sec, cyt_idx, G, clip_max):
     mm2 = masks_mean[:, MASK_M2]
     z   = np.zeros(n, np.float64)
 
-    s1_map = [sec[0]*me, sec[3]*mna, sec[4]*mm1, sec[5]*mm1, sec[6]*mna, sec[8]*mm2]
+    # ── Bug 1 fix: IL-10 (index 3) source uses mm2, not mm1 ──
+    # sec[5] = km2il10 → M2 macrophage secretion for IL-10
+    s1_map = [sec[0]*me, sec[3]*mna, sec[4]*mm1, sec[5]*mm2, sec[6]*mna, sec[8]*mm2]
+    #                                             ^^^ FIXED: was mm1, now mm2
     s2_map = [sec[1]*mnn, z, z, z, sec[7]*mm1, z]
     e_map  = [sec[2]*mna, z, z, z, z, z]
 
@@ -399,28 +402,63 @@ def predict_full(model, Xbranch, Xtrunk, chunk=EVAL_CHUNK):
     return out
 
 
-def calculate_metrics(y_true, y_pred, masks):
+# ── Metrics (fixed per scientific rigor report) ──────────────────────────────
+
+def _fisher_z(r):
+    r = np.clip(r, -0.9999, 0.9999)
+    return 0.5 * np.log((1.0 + r) / (1.0 - r))
+
+def _inv_fisher_z(z):
+    return float(np.tanh(z))
+
+def calculate_metrics(y_true, y_pred, masks, clip_max):
     T = min(y_true.shape[0], y_pred.shape[0], masks.shape[0])
     yt = y_true[:T]; yp = np.maximum(y_pred[:T], 0.0)
     ms = np.max(masks[:T], axis=-1, keepdims=True)
-    rmse = float(np.sqrt(np.sum(np.square(yt-yp)*ms) / (np.sum(ms)+1e-12)))
+
+    sq_diff = np.square(yt - yp)
+    rmse = float(np.sqrt(np.sum(sq_diff * ms) / (np.sum(ms) + 1e-12)))
+    unmasked_rmse = float(np.sqrt(np.mean(sq_diff)))
     r2   = float(r2_score(yt.flatten(), yp.flatten()))
-    dices=[]; corrs=[]; ssims_v=[]
+
+    per_t_r2 = []
+    for t in range(T):
+        gt_f = yt[t].flatten(); pr_f = yp[t].flatten()
+        per_t_r2.append(float(r2_score(gt_f, pr_f)) if np.std(gt_f) > 1e-12 else np.nan)
+
+    dice_thr = 0.05 * clip_max if clip_max > 0 else 1e-9
+    dices = []; n_empty = 0
+    z_corrs = []
+    ssims_v = []; n_ssim_skip = 0
+    fixed_dr = float(clip_max) if clip_max > 0 else 1.0
+
     for t in range(T):
         gt = yt[t,:,:,0]; pr = yp[t,:,:,0]
-        thr = 0.05*float(np.max(gt)) if np.max(gt)>0 else 1e-9
-        gb=(gt>thr).astype(float); pb=(pr>thr).astype(float)
-        dices.append((2*np.sum(gb*pb)+1e-6)/(np.sum(gb)+np.sum(pb)+1e-6))
-        if np.std(gt)>1e-12 and np.std(pr)>1e-12:
-            corrs.append(float(pearsonr(gt.flatten(),pr.flatten())[0]))
-        dr = float(np.max(gt)-np.min(gt))
-        if dr>1e-12:
-            ssims_v.append(float(ssim(gt,pr,data_range=dr)))
+        gb = (gt > dice_thr).astype(float); pb = (pr > dice_thr).astype(float)
+        if np.sum(gb) + np.sum(pb) == 0:
+            n_empty += 1
+        else:
+            dices.append((2.0 * np.sum(gb * pb)) / (np.sum(gb) + np.sum(pb) + 1e-12))
+        if np.std(gt) > 1e-12 and np.std(pr) > 1e-12:
+            r_val = float(pearsonr(gt.flatten(), pr.flatten())[0])
+            if np.isfinite(r_val):
+                z_corrs.append(_fisher_z(r_val))
+        dr = float(np.max(gt) - np.min(gt))
+        if dr > 1e-12:
+            ssims_v.append(float(ssim(gt, pr, data_range=fixed_dr)))
+        else:
+            n_ssim_skip += 1
+
     return {
-        "Global_R2": r2, "Masked_RMSE": rmse,
-        "Avg_Dice": float(np.mean(dices)),
-        "Spatial_Correlation": float(np.mean(corrs)) if corrs else 0.0,
-        "SSIM": float(np.mean(ssims_v)) if ssims_v else 0.0,
+        "Global_R2":           r2,
+        "Per_Timestep_R2":     per_t_r2,
+        "Masked_RMSE":         rmse,
+        "Unmasked_RMSE":       unmasked_rmse,
+        "Avg_Dice":            float(np.mean(dices)) if dices else 0.0,
+        "Dice_Empty_Skipped":  n_empty,
+        "Spatial_Correlation": _inv_fisher_z(float(np.mean(z_corrs))) if z_corrs else 0.0,
+        "SSIM":                float(np.mean(ssims_v)) if ssims_v else 0.0,
+        "SSIM_Skipped_Frames": n_ssim_skip,
     }
 
 def denormalize(x, clip_max):
@@ -543,16 +581,17 @@ def run_pipeline(grid, seed, cytokine):
     Y_phys  = denormalize(Y.reshape(N, G, G, 1), clip_max)
     Yp_phys = denormalize(Yp, clip_max)
 
+    # ── Bug 3 + Issue 11 fix: non-overlapping test windows ──
     suffix  = f"{cytokine}_{grid}_{seed}"
     results = {
         "grid": grid, "seed": seed, "cytokine": cytokine,
         "best_params": best,
         "optuna_best_val_loss": float(study.best_value),
         "results": {
-            "Interpolation_72_89": calculate_metrics(
-                Y_phys[70:88], Yp_phys[70:88], M[70:88]),
-            "Extrapolation_82_100": calculate_metrics(
-                Y_phys[80:99], Yp_phys[80:99], M[80:99]),
+            "Near_Horizon_t82_t91": calculate_metrics(
+                Y_phys[80:90], Yp_phys[80:90], M[80:90], clip_max),
+            "Far_Horizon_t92_t100": calculate_metrics(
+                Y_phys[90:99], Yp_phys[90:99], M[90:99], clip_max),
         },
     }
     with open(out_dir/f"res_{suffix}.json", "w") as f:

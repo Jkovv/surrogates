@@ -16,17 +16,27 @@ CELL_TYPE_IDS   = {"EC": 1, "NN": 2, "NA": 3, "M1": 4, "M2": 5}
 
 N_TIMESTEPS  = 101
 WINDOW       = 2 # look-back window for LSTM / branch inputs
+# NOTE (Issue 18 — scientific rigor report): This window size is not ablated.
+# Before publication, run ablation with WINDOW ∈ {1, 2, 3, 5} and report
+# validation loss as a function of window size.
 GPR_MAX_GRID = 100     
 
 
 def adaptive_clip_percentile(channel: np.ndarray) -> float:
     """
+    Adaptive percentile clipping based on excess kurtosis.
+
     Thresholds:
         kurtosis <  20  →  100.0 %   (raw MinMax - IL-8 all resolutions)
         kurtosis < 100  →   99.5 %
         kurtosis < 300  →   99.0 %
         kurtosis < 600  →   98.5 %
         kurtosis >= 600 →   98.0 %   (IL-6 / IL-10 at 500x500)
+
+    NOTE (Issue 17 — scientific rigor report): These breakpoints are empirical
+    heuristics. Before publication, an ablation study comparing different
+    clipping strategies (fixed percentiles, IQR-based, log-transform) against
+    downstream model metrics is required to justify this choice.
     """
     flat = channel.flatten().astype(np.float64)
     if len(flat) < 4 or flat.std() < 1e-30:
@@ -45,6 +55,11 @@ def scale_channel(channel: np.ndarray, pct: float):
     """
     Clip at `pct` percentile then linearly map to [-1, 1].
     Returns (scaled, c_min, c_max).
+
+    NOTE (Issue 19 — scientific rigor report): Since cytokine concentrations
+    are non-negative (c_min=0 always), the [-1, 1] range means all zero values
+    map to -1.0. Consider [0, 1] normalization for physics-informed models
+    where output activations naturally produce non-negative values.
     """
     c_min = float(channel.min())
     c_max = float(np.percentile(channel, pct))

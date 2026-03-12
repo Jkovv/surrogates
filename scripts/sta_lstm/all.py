@@ -97,41 +97,97 @@ class STALSTM(tf.keras.Model):
         h = self.out_conv(h)          
         return self.out_resize(h)     
 
+
+# ── Metrics (fixed per scientific rigor report) ──────────────────────────────
+
+def _fisher_z(r):
+    r = np.clip(r, -0.9999, 0.9999)
+    return 0.5 * np.log((1.0 + r) / (1.0 - r))
+
+def _inv_fisher_z(z):
+    return float(np.tanh(z))
+
 def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
-                      masks: np.ndarray) -> dict:
+                      masks: np.ndarray, clip_max: float) -> dict:
+    """
+    Fixed metrics:
+      Bug 2:    Dice skips empty fields instead of returning 1.0
+      Issue 12: Fisher z-transform for correlation averaging
+      Issue 13: Fixed physical Dice threshold from clip_max
+      Issue 14: Per-timestep R²
+      Issue 15: Fixed SSIM data_range from clip_max
+      Issue 16: Both masked and unmasked RMSE
+    """
     min_t = min(y_true.shape[0], y_pred.shape[0], masks.shape[0])
     y_t   = y_true[:min_t]
     y_p   = np.maximum(y_pred[:min_t], 0.0)
     m_s   = np.max(masks[:min_t], axis=-1, keepdims=True)
 
-    sq_diff = np.square(y_t - y_p) * m_s
-    rmse    = float(np.sqrt(np.sum(sq_diff) / (np.sum(m_s) + 1e-12)))
-    r2      = float(r2_score(y_t.flatten(), y_p.flatten()))
+    # RMSE: masked + unmasked (Issue 16)
+    sq_diff = np.square(y_t - y_p)
+    rmse    = float(np.sqrt(np.sum(sq_diff * m_s) / (np.sum(m_s) + 1e-12)))
+    unmasked_rmse = float(np.sqrt(np.mean(sq_diff)))
 
-    dices, corrs, ssims = [], [], []
+    # Global R²
+    r2 = float(r2_score(y_t.flatten(), y_p.flatten()))
+
+    # Per-timestep R² (Issue 14)
+    per_t_r2 = []
+    for t in range(min_t):
+        gt_f = y_t[t].flatten(); pr_f = y_p[t].flatten()
+        if np.std(gt_f) > 1e-12:
+            per_t_r2.append(float(r2_score(gt_f, pr_f)))
+        else:
+            per_t_r2.append(np.nan)
+
+    # Dice with fixed threshold + empty-field handling (Bug 2, Issue 13)
+    dice_thr = 0.05 * clip_max if clip_max > 0 else 1e-9
+    dices, n_empty = [], 0
+    # Spatial correlation with Fisher z (Issue 12)
+    z_corrs = []
+    # SSIM with fixed data_range (Issue 15)
+    ssims, n_ssim_skip = [], 0
+    fixed_dr = float(clip_max) if clip_max > 0 else 1.0
+
     for t in range(min_t):
         gt = y_t[t, :, :, 0]
         pr = y_p[t, :, :, 0]
 
-        thresh = 0.05 * float(np.max(gt)) if np.max(gt) > 0 else 1e-9
-        g_b    = (gt > thresh).astype(float)
-        p_b    = (pr > thresh).astype(float)
-        dices.append(
-            (2.0 * np.sum(g_b * p_b) + 1e-6) / (np.sum(g_b) + np.sum(p_b) + 1e-6)
-        )
-        if np.std(gt) > 1e-12 and np.std(pr) > 1e-12:
-            corrs.append(float(pearsonr(gt.flatten(), pr.flatten())[0]))
+        # Dice
+        g_b = (gt > dice_thr).astype(float)
+        p_b = (pr > dice_thr).astype(float)
+        if np.sum(g_b) + np.sum(p_b) == 0:
+            n_empty += 1  # Bug 2: skip, don't append 1.0
+        else:
+            dices.append(
+                (2.0 * np.sum(g_b * p_b)) / (np.sum(g_b) + np.sum(p_b) + 1e-12)
+            )
 
-        data_range = float(np.max(gt) - np.min(gt))
-        if data_range > 1e-12:
-            ssims.append(float(ssim(gt, pr, data_range=data_range)))
+        # Spatial correlation
+        if np.std(gt) > 1e-12 and np.std(pr) > 1e-12:
+            r_val = float(pearsonr(gt.flatten(), pr.flatten())[0])
+            if np.isfinite(r_val):
+                z_corrs.append(_fisher_z(r_val))
+
+        # SSIM
+        dr = float(np.max(gt) - np.min(gt))
+        if dr > 1e-12:
+            ssims.append(float(ssim(gt, pr, data_range=fixed_dr)))
+        else:
+            n_ssim_skip += 1
+
+    spatial_corr = _inv_fisher_z(float(np.mean(z_corrs))) if z_corrs else 0.0
 
     return {
         "Global_R2":           r2,
+        "Per_Timestep_R2":     per_t_r2,
         "Masked_RMSE":         rmse,
-        "Avg_Dice":            float(np.mean(dices)),
-        "Spatial_Correlation": float(np.mean(corrs)) if corrs else 0.0,
-        "SSIM":                float(np.mean(ssims))  if ssims  else 0.0,
+        "Unmasked_RMSE":       unmasked_rmse,
+        "Avg_Dice":            float(np.mean(dices)) if dices else 0.0,
+        "Dice_Empty_Skipped":  n_empty,
+        "Spatial_Correlation": spatial_corr,
+        "SSIM":                float(np.mean(ssims)) if ssims else 0.0,
+        "SSIM_Skipped_Frames": n_ssim_skip,
     }
 
 def denormalize(scaled: np.ndarray, clip_max: float) -> np.ndarray:
@@ -185,6 +241,10 @@ def run_pipeline(grid: int, seed: int, cytokine: str):
         meta = json.load(f)
     clip_max = float(meta["scaling"]["max"][idx])
 
+    # ── Bug 3 fix: non-overlapping train / val / test splits ──
+    # Train: samples 0–69  (t=2..71)
+    # Val:   samples 70–79 (t=72..81) — used for HP tuning only
+    # Test:  samples 80–98 (t=82..100) — never seen during training or tuning
     X_train, Y_train = X[:70],   Y[:70]
     X_val,   Y_val   = X[70:80], Y[70:80]
 
@@ -237,12 +297,17 @@ def run_pipeline(grid: int, seed: int, cytokine: str):
         ],
     )
 
-    # eval 
+    # ── Evaluation (Bug 3 + Issue 11 fix) ──
+    # Predict on ALL samples for analysis, but evaluate on non-overlapping windows
     Y_p_scaled = model.predict(X, batch_size=2)
     Y_p_phys   = denormalize(Y_p_scaled, clip_max)
     Y_a_phys   = denormalize(Y,          clip_max)
 
     suffix  = f"{cytokine}_{grid}_{seed}"
+
+    # Bug 3 fix: evaluation windows that do NOT include validation data
+    # Near-horizon: samples 80–89 (t=82–91) — immediately after validation
+    # Far-horizon:  samples 90–98 (t=92–100) — furthest from training
     results = {
         "grid":                 grid,
         "seed":                 seed,
@@ -250,11 +315,11 @@ def run_pipeline(grid: int, seed: int, cytokine: str):
         "best_params":          best,
         "optuna_best_val_loss": float(study.best_value),
         "results": {
-            "Interpolation_72_89":  calculate_metrics(
-                Y_a_phys[70:88], Y_p_phys[70:88], M[70:88]
+            "Near_Horizon_t82_t91": calculate_metrics(
+                Y_a_phys[80:90], Y_p_phys[80:90], M[80:90], clip_max
             ),
-            "Extrapolation_82_100": calculate_metrics(
-                Y_a_phys[80:99], Y_p_phys[80:99], M[80:99]
+            "Far_Horizon_t92_t100": calculate_metrics(
+                Y_a_phys[90:99], Y_p_phys[90:99], M[90:99], clip_max
             ),
         },
     }
