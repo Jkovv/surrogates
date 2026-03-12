@@ -180,8 +180,7 @@ def predict_full(model, Xbranch, Xtrunk, chunk=EVAL_CHUNK):
     return out
 
 
-# ── Metrics (fixed per scientific rigor report) ──────────────────────────────
-
+# metrics 
 def _fisher_z(r):
     r = np.clip(r, -0.9999, 0.9999)
     return 0.5 * np.log((1.0 + r) / (1.0 - r))
@@ -328,7 +327,6 @@ def run_pipeline(grid, seed, cytokine):
     Y_phys  = denormalize(Y.reshape(N, G, G, 1), clip_max)
     Yp_phys = denormalize(Yp, clip_max)
 
-    # ── Bug 3 + Issue 11 fix: non-overlapping test windows ──
     suffix  = f"{cytokine}_{grid}_{seed}"
     results = {
         "grid": grid, "seed": seed, "cytokine": cytokine,
@@ -359,3 +357,4 @@ if __name__ == "__main__":
         for d in sorted(Path("./preprocessed").iterdir()):
             if d.is_dir():
                 run_pipeline(int(d.name.split("x")[0]), args.seed, args.cytokine)
+
