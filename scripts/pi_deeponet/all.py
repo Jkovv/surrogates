@@ -1,4 +1,4 @@
-import os, json, argparse, random, warnings, gc
+import os, json, argparse, random, warnings, gc, time
 from pathlib import Path
 
 import numpy as np
@@ -58,7 +58,7 @@ def build_source_arrays(masks_mean, sec, cyt_idx, G, clip_max):
     mm2 = masks_mean[:, MASK_M2]
     z   = np.zeros(n, np.float64)
 
-    # sec[5] = km2il10 → M2 macrophage secretion for IL-10
+    # sec[5] = km2il10 -> M2 macrophage secretion for IL-10
     s1_map = [sec[0]*me, sec[3]*mna, sec[4]*mm1, sec[5]*mm2, sec[6]*mna, sec[8]*mm2]
     s2_map = [sec[1]*mnn, z, z, z, sec[7]*mm1, z]
     e_map  = [sec[2]*mna, z, z, z, z, z]
@@ -115,20 +115,20 @@ class PIDeepONet(tf.keras.Model):
     def call_data(self, xb, xt, training=False):
         """
         Data forward pass.
-        xb: (batch, D_branch) — branch input
-        xt: (batch, n_pts, 3) — trunk input (x, y, t)
+        xb: (batch, D_branch) - branch input
+        xt: (batch, n_pts, 3) - trunk input (x, y, t)
         Returns: (batch, n_pts, 1)
         """
         b = self.branch(xb, training=training)         # (batch, p)
-        t = self.trunk(xt)                              # (batch, n_pts, p)
+        t = self.trunk(xt)                             # (batch, n_pts, p)
         r = tf.einsum("bp,bnp->bn", b, t) + self.bias  # (batch, n_pts)
-        return tf.expand_dims(r, -1)                    # (batch, n_pts, 1)
+        return tf.expand_dims(r, -1)                   # (batch, n_pts, 1)
 
     def call_physics_single(self, xb_single, xyt):
-        b = self.branch(xb_single, training=True)       # (1, p)
-        t = self.trunk(xyt)                              # (N_c, p)
+        b = self.branch(xb_single, training=True)      # (1, p)
+        t = self.trunk(xyt)                            # (N_c, p)
         r = tf.reduce_sum(b[0] * t, axis=-1, keepdims=True) + self.bias
-        return r                                         # (N_c, 1)
+        return r                                       # (N_c, 1)
 
     def call(self, inputs, training=False):
         return self.call_data(inputs[0], inputs[1], training=training)
@@ -152,7 +152,7 @@ def build_branch_inputs(Xb, Xt, cyt_idx):
         ff0 = f0[i]; ff1 = f1[i]; m = mask_any[i]
         na = float(np.sum(m)) + 1e-6
 
-        # Cytokine stats (rescale from [-1,1] to [0,1])
+        # cytokine stats 
         out[i, 0] = (float(np.max(ff0)) + 1.0) / 2.0
         out[i, 1] = (float(np.mean(ff0)) + 1.0) / 2.0
         out[i, 2] = float(np.std(ff0))
@@ -160,16 +160,16 @@ def build_branch_inputs(Xb, Xt, cyt_idx):
         out[i, 4] = (float(np.mean(ff1)) + 1.0) / 2.0
         out[i, 5] = float(np.std(ff1))
 
-        # Cell geometry
+        # cell geometry
         out[i, 6] = float(np.sum(xx * m) / na)   # centroid_x
         out[i, 7] = float(np.sum(yy * m) / na)   # centroid_y
         out[i, 8] = na / G2                        # extent
 
-        # Per-type cell densities
+        # per-type cell densities
         for ct in range(5):
             out[i, 9 + ct] = float(np.sum(masks[i, :, :, ct] > 0.5)) / G2
 
-        # Time
+        # time
         out[i, 14] = float(Xt[i, 0, 2])
 
     return out
@@ -222,7 +222,7 @@ def compute_pde_residual(model, xb_single, xyt, D, k, s1_tf, s2_tf, e_tf, G):
         u_t = du[:, 2:3]
 
     du_x_grad = tape2.gradient(u_x, xyt)  # (N_c, 3)
-    du_y_grad = tape2.gradient(u_y, xyt)   # (N_c, 3)
+    du_y_grad = tape2.gradient(u_y, xyt)  # (N_c, 3)
     u_xx = du_x_grad[:, 0:1]
     u_yy = du_y_grad[:, 1:2]
 
@@ -400,7 +400,7 @@ def predict_full(model, Xbranch, Xtrunk, chunk=EVAL_CHUNK):
     return out
 
 
-# metrics 
+# metrics
 def _fisher_z(r):
     r = np.clip(r, -0.9999, 0.9999)
     return 0.5 * np.log((1.0 + r) / (1.0 - r))
@@ -552,6 +552,9 @@ def run_pipeline(grid, seed, cytokine):
 
     # final training 
     tf.keras.backend.clear_session(); set_seed(seed)
+
+    t_start = time.time()
+
     ds_tr = build_dataset(Xbr_tr, Xtr_tr, Yf_tr,
                           best["batch_size"], best["chunk_size"], shuffle=True)
     ds_vl = build_dataset(Xbr_vl, Xtr_vl, Yf_vl,
@@ -572,17 +575,22 @@ def run_pipeline(grid, seed, cytokine):
         verbose=True, physics_every=1,
     )
 
-    # evaluate 
+    # evaluation
     Yp_flat = predict_full(model, Xbranch, Xtrunk)
     Yp      = Yp_flat.reshape(N, G, G, 1)
     Y_phys  = denormalize(Y.reshape(N, G, G, 1), clip_max)
     Yp_phys = denormalize(Yp, clip_max)
 
+    # test windows
     suffix  = f"{cytokine}_{grid}_{seed}"
+    train_elapsed = time.time() - t_start
+    print(f"  Training + prediction time: {train_elapsed:.1f}s")
+
     results = {
         "grid": grid, "seed": seed, "cytokine": cytokine,
         "best_params": best,
         "optuna_best_val_loss": float(study.best_value),
+        "train_time_seconds":   round(train_elapsed, 2),
         "results": {
             "Near_Horizon_t82_t91": calculate_metrics(
                 Y_phys[80:90], Yp_phys[80:90], M[80:90], clip_max),
@@ -612,4 +620,3 @@ if __name__ == "__main__":
         for d in sorted(Path("./preprocessed").iterdir()):
             if d.is_dir():
                 run_pipeline(int(d.name.split("x")[0]), args.seed, args.cytokine)
-

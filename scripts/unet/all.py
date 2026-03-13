@@ -2,6 +2,7 @@ import os
 import json
 import argparse
 import random
+import time
 from pathlib import Path
 
 import numpy as np
@@ -49,7 +50,6 @@ def _decoder_block(x, skip, filters):
     x = tf.keras.layers.Conv2DTranspose(
         filters, 2, strides=2, padding="same", activation="relu"
     )(x)
-    # handle size mismatches from non-power-of-2 grids
     if x.shape[1] != skip.shape[1] or x.shape[2] != skip.shape[2]:
         x = tf.keras.layers.Resizing(skip.shape[1], skip.shape[2])(x)
     x = tf.keras.layers.Concatenate()([x, skip])
@@ -60,12 +60,7 @@ def _decoder_block(x, skip, filters):
 def build_unet(grid_size: int, in_channels: int = 22,
                out_channels: int = 1, base_filters: int = 32,
                depth: int = 4, dropout: float = 0.0):
-    """
-    Standard U-Net with configurable depth and filter count.
 
-    Input:  (batch, G, G, in_channels)  — WINDOW*11 = 22 channels
-    Output: (batch, G, G, out_channels) — 1 cytokine field
-    """
     inputs = tf.keras.Input(shape=(grid_size, grid_size, in_channels))
 
     # encoder
@@ -103,20 +98,21 @@ def _inv_fisher_z(z):
 
 def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
                       masks: np.ndarray, clip_max: float) -> dict:
+
     min_t = min(y_true.shape[0], y_pred.shape[0], masks.shape[0])
     y_t   = y_true[:min_t]
     y_p   = np.maximum(y_pred[:min_t], 0.0)
     m_s   = np.max(masks[:min_t], axis=-1, keepdims=True)
 
-    # RMSE: masked + unmasked 
+    # RMSE
     sq_diff = np.square(y_t - y_p)
     rmse    = float(np.sqrt(np.sum(sq_diff * m_s) / (np.sum(m_s) + 1e-12)))
     unmasked_rmse = float(np.sqrt(np.mean(sq_diff)))
 
-    # Global R²
+    # global R²
     r2 = float(r2_score(y_t.flatten(), y_p.flatten()))
 
-    # Per-timestep R² 
+    # per-timestep R² 
     per_t_r2 = []
     for t in range(min_t):
         gt_f = y_t[t].flatten(); pr_f = y_p[t].flatten()
@@ -125,12 +121,12 @@ def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
         else:
             per_t_r2.append(np.nan)
 
-    # Dice with fixed threshold + empty-field handling 
+    # dice with fixed threshold 
     dice_thr = 0.05 * clip_max if clip_max > 0 else 1e-9
     dices, n_empty = [], 0
-    # Spatial correlation with Fisher z 
+    # spatial correlation with Fisher z 
     z_corrs = []
-    # SSIM with fixed data_range 
+    # SSIM 
     ssims, n_ssim_skip = [], 0
     fixed_dr = float(clip_max) if clip_max > 0 else 1.0
 
@@ -138,7 +134,7 @@ def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
         gt = y_t[t, :, :, 0]
         pr = y_p[t, :, :, 0]
 
-        # Dice
+        # dice
         g_b = (gt > dice_thr).astype(float)
         p_b = (pr > dice_thr).astype(float)
         if np.sum(g_b) + np.sum(p_b) == 0:
@@ -148,7 +144,7 @@ def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
                 (2.0 * np.sum(g_b * p_b)) / (np.sum(g_b) + np.sum(p_b) + 1e-12)
             )
 
-        # Spatial correlation
+        # spatial correlation
         if np.std(gt) > 1e-12 and np.std(pr) > 1e-12:
             r_val = float(pearsonr(gt.flatten(), pr.flatten())[0])
             if np.isfinite(r_val):
@@ -179,8 +175,7 @@ def denormalize(scaled: np.ndarray, clip_max: float) -> np.ndarray:
     return (np.asarray(scaled, dtype=np.float64) + 1.0) / 2.0 * clip_max
 
 
-# Optuna 
-
+# optuna
 def make_objective(X_train, Y_train, X_val, Y_val, grid_size, seed):
     def objective(trial):
         set_seed(seed)
@@ -216,7 +211,6 @@ def make_objective(X_train, Y_train, X_val, Y_val, grid_size, seed):
 
 
 # pipeline 
-
 def run_pipeline(grid: int, seed: int, cytokine: str):
     set_seed(seed)
 
@@ -227,8 +221,8 @@ def run_pipeline(grid: int, seed: int, cytokine: str):
     out_dir   = Path("./models/unet")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # X_unet: (99, G, G, 22) — 2 frames × (6 cytokines + 5 masks) collapsed
-    # Y_target: (99, G, G, 6) — select single cytokine → (99, G, G, 1)
+    # X_unet: (99, G, G, 22) - 2 frames * (6 cytokines + 5 masks) collapsed
+    # Y_target: (99, G, G, 6) - single cytokine -> (99, G, G, 1)
     X = np.load(data_path / "X_unet.npy").astype(np.float32)
     Y = np.load(data_path / "Y_target.npy").astype(np.float32)[..., idx:idx+1]
     M = np.load(data_path / "Y_masks_spatial.npy").astype(np.float32)
@@ -239,10 +233,6 @@ def run_pipeline(grid: int, seed: int, cytokine: str):
 
     in_channels = X.shape[-1]  # 22
 
-    # Non-overlapping train / val / test splits
-    # Train: samples 0–69  (t=2..71)
-    # Val:   samples 70–79 (t=72..81) — used for HP tuning only
-    # Test:  samples 80–98 (t=82..100) — never seen during training or tuning
     X_train, Y_train = X[:70],   Y[:70]
     X_val,   Y_val   = X[70:80], Y[70:80]
 
@@ -267,6 +257,8 @@ def run_pipeline(grid: int, seed: int, cytokine: str):
     # final train
     tf.keras.backend.clear_session()
     set_seed(seed)
+
+    t_start = time.time()
 
     model = build_unet(
         grid_size=grid,
@@ -297,22 +289,22 @@ def run_pipeline(grid: int, seed: int, cytokine: str):
         ],
     )
 
-    # evaluation — predict ALL samples, evaluate on held-out test windows
+    # evaluation
     Y_p_scaled = model.predict(X, batch_size=2)
     Y_p_phys   = denormalize(Y_p_scaled, clip_max)
     Y_a_phys   = denormalize(Y,          clip_max)
 
     suffix = f"{cytokine}_{grid}_{seed}"
+    train_elapsed = time.time() - t_start
+    print(f"  Training + prediction time: {train_elapsed:.1f}s")
 
-    # Non-overlapping test windows (no validation leakage)
-    # Near-horizon: samples 80–89 (t=82–91)
-    # Far-horizon:  samples 90–98 (t=92–100)
     results = {
         "grid":                 grid,
         "seed":                 seed,
         "cytokine":             cytokine,
         "best_params":          best,
         "optuna_best_val_loss": float(study.best_value),
+        "train_time_seconds":   round(train_elapsed, 2),
         "results": {
             "Near_Horizon_t82_t91": calculate_metrics(
                 Y_a_phys[80:90], Y_p_phys[80:90], M[80:90], clip_max

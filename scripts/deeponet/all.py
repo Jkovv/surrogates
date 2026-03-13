@@ -1,4 +1,4 @@
-import os, json, argparse, random
+import os, json, argparse, random, time
 from pathlib import Path
 
 import numpy as np
@@ -180,7 +180,8 @@ def predict_full(model, Xbranch, Xtrunk, chunk=EVAL_CHUNK):
     return out
 
 
-# metrics 
+# metrics
+
 def _fisher_z(r):
     r = np.clip(r, -0.9999, 0.9999)
     return 0.5 * np.log((1.0 + r) / (1.0 - r))
@@ -310,6 +311,9 @@ def run_pipeline(grid, seed, cytokine):
 
     #final training 
     tf.keras.backend.clear_session(); set_seed(seed)
+
+    t_start = time.time()
+
     ds_tr = build_dataset(Xbr_tr, Xtr_tr, Yf_tr,
                           best["batch_size"], best["chunk_size"], shuffle=True)
     ds_vl = build_dataset(Xbr_vl, Xtr_vl, Yf_vl,
@@ -327,11 +331,16 @@ def run_pipeline(grid, seed, cytokine):
     Y_phys  = denormalize(Y.reshape(N, G, G, 1), clip_max)
     Yp_phys = denormalize(Yp, clip_max)
 
+    # test windows 
     suffix  = f"{cytokine}_{grid}_{seed}"
+    train_elapsed = time.time() - t_start
+    print(f"  Training + prediction time: {train_elapsed:.1f}s")
+
     results = {
         "grid": grid, "seed": seed, "cytokine": cytokine,
         "best_params":          best,
         "optuna_best_val_loss": float(study.best_value),
+        "train_time_seconds":   round(train_elapsed, 2),
         "results": {
             "Near_Horizon_t82_t91": calculate_metrics(
                 Y_phys[80:90], Yp_phys[80:90], M[80:90], clip_max),
@@ -357,4 +366,3 @@ if __name__ == "__main__":
         for d in sorted(Path("./preprocessed").iterdir()):
             if d.is_dir():
                 run_pipeline(int(d.name.split("x")[0]), args.seed, args.cytokine)
-

@@ -2,6 +2,7 @@ import os
 import json
 import argparse
 import random
+import time
 from pathlib import Path
 
 import numpy as np
@@ -108,21 +109,20 @@ def _inv_fisher_z(z):
 
 def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
                       masks: np.ndarray, clip_max: float) -> dict:
-
     min_t = min(y_true.shape[0], y_pred.shape[0], masks.shape[0])
     y_t   = y_true[:min_t]
     y_p   = np.maximum(y_pred[:min_t], 0.0)
     m_s   = np.max(masks[:min_t], axis=-1, keepdims=True)
 
-    # RMSE: masked + unmasked 
+    # RMSE
     sq_diff = np.square(y_t - y_p)
     rmse    = float(np.sqrt(np.sum(sq_diff * m_s) / (np.sum(m_s) + 1e-12)))
     unmasked_rmse = float(np.sqrt(np.mean(sq_diff)))
 
-    # Global R²
+    # global R²
     r2 = float(r2_score(y_t.flatten(), y_p.flatten()))
 
-    # Per-timestep R² 
+    # per-timestep R² 
     per_t_r2 = []
     for t in range(min_t):
         gt_f = y_t[t].flatten(); pr_f = y_p[t].flatten()
@@ -134,9 +134,9 @@ def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
     # Dice with fixed threshold + empty-field handling 
     dice_thr = 0.05 * clip_max if clip_max > 0 else 1e-9
     dices, n_empty = [], 0
-    # Spatial correlation with Fisher z 
+    # spatial correlation with Fisher z 
     z_corrs = []
-    # SSIM with fixed data_range 
+    # SSIM 
     ssims, n_ssim_skip = [], 0
     fixed_dr = float(clip_max) if clip_max > 0 else 1.0
 
@@ -148,7 +148,7 @@ def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
         g_b = (gt > dice_thr).astype(float)
         p_b = (pr > dice_thr).astype(float)
         if np.sum(g_b) + np.sum(p_b) == 0:
-            n_empty += 1 
+            n_empty += 1  
         else:
             dices.append(
                 (2.0 * np.sum(g_b * p_b)) / (np.sum(g_b) + np.sum(p_b) + 1e-12)
@@ -232,9 +232,6 @@ def run_pipeline(grid: int, seed: int, cytokine: str):
         meta = json.load(f)
     clip_max = float(meta["scaling"]["max"][idx])
 
-    # Train: samples 0–69  (t=2..71)
-    # Val:   samples 70–79 (t=72..81) - used for HP tuning only
-    # Test:  samples 80–98 (t=82..100) - never seen during training or tuning
     X_train, Y_train = X[:70],   Y[:70]
     X_val,   Y_val   = X[70:80], Y[70:80]
 
@@ -259,6 +256,8 @@ def run_pipeline(grid: int, seed: int, cytokine: str):
     # final train 
     tf.keras.backend.clear_session()
     set_seed(seed)
+
+    t_start = time.time()
 
     model = STALSTM(
         grid_size=grid,
@@ -287,21 +286,21 @@ def run_pipeline(grid: int, seed: int, cytokine: str):
         ],
     )
 
-    # evaluation 
     Y_p_scaled = model.predict(X, batch_size=2)
     Y_p_phys   = denormalize(Y_p_scaled, clip_max)
     Y_a_phys   = denormalize(Y,          clip_max)
 
     suffix  = f"{cytokine}_{grid}_{seed}"
-
-    # Near-horizon: samples 80–89 (t=82–91) - immediately after validation
-    # Far-horizon:  samples 90–98 (t=92–100) - furthest from training
+    train_elapsed = time.time() - t_start
+    print(f"  Training + prediction time: {train_elapsed:.1f}s")
+    
     results = {
         "grid":                 grid,
         "seed":                 seed,
         "cytokine":             cytokine,
         "best_params":          best,
         "optuna_best_val_loss": float(study.best_value),
+        "train_time_seconds":   round(train_elapsed, 2),
         "results": {
             "Near_Horizon_t82_t91": calculate_metrics(
                 Y_a_phys[80:90], Y_p_phys[80:90], M[80:90], clip_max

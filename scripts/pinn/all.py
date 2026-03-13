@@ -1,4 +1,4 @@
-import os, json, argparse, random, warnings, gc
+import os, json, argparse, random, warnings, gc, time
 from pathlib import Path
 
 import numpy as np
@@ -73,7 +73,7 @@ def build_source_terms_1cyt(masks_flat, sec, cyt_idx, G, clip_max):
     mm2 = masks_flat[:, MASK_M2]
     z   = np.zeros(n, np.float64)
 
-    # sec[5] = km2il10 → M2 macrophage secretion for IL-10
+    # sec[5] = km2il10 -> M2 macrophage secretion for IL-10
     s1_map = [sec[0]*me, sec[3]*mna, sec[4]*mm1, sec[5]*mm2, sec[6]*mna, sec[8]*mm2]
     s2_map = [sec[1]*mnn, z, z, z, sec[7]*mm1, z]
     e_map  = [sec[2]*mna, z, z, z, z, z]
@@ -121,7 +121,7 @@ def make_pde_1cyt(D, k, s1_tf, s2_tf, e_tf, G):
     return pde
 
 
-# metrics 
+# metrics
 def _fisher_z(r):
     r = np.clip(r, -0.9999, 0.9999)
     return 0.5 * np.log((1.0 + r) / (1.0 - r))
@@ -279,7 +279,7 @@ def run_pipeline(grid, seed, cytokine):
     print(f"\n[{cytokine.upper()}] {grid}x{grid} — loading data...")
 
     Y_tgt  = np.load(data_path / "Y_target.npy").astype(np.float64)         # (99,G,G,6) scaled
-    M_spat = np.load(data_path / "Y_masks_spatial.npy").astype(np.float64)   # (99,G,G,5)
+    M_spat = np.load(data_path / "Y_masks_spatial.npy").astype(np.float64)  # (99,G,G,5)
     M_pinn = np.load(data_path / "Y_masks_pinn.npy").astype(np.float64)     # (99,G*G,5)
     Y_ic_full = np.load(data_path / "Y_ic.npy").astype(np.float64)          # (G,G,6) scaled
 
@@ -353,6 +353,8 @@ def run_pipeline(grid, seed, cytokine):
 
     tf.keras.backend.clear_session(); set_seed(seed)
 
+    t_start = time.time()
+
     WARMUP_ITERS = 5_000
     print(f"Phase 1: Data-only warmup ({WARMUP_ITERS} Adam, lambda_pde=0)...")
     model = build_dde_model(
@@ -412,11 +414,16 @@ def run_pipeline(grid, seed, cytokine):
     Y_phys  = denormalize(Y_tgt[..., cyt_idx:cyt_idx + 1], clip_max)
     Yp_phys = denormalize(Yp_all, clip_max)
 
+    # test windows
     suffix = f"{cytokine}_{grid}_{seed}"
+    train_elapsed = time.time() - t_start
+    print(f"  Training + prediction time: {train_elapsed:.1f}s")
+
     results = {
         "grid": grid, "seed": seed, "cytokine": cytokine,
         "best_params":          best,
         "optuna_best_val_loss": float(study.best_value),
+        "train_time_seconds":   round(train_elapsed, 2),
         "results": {
             "Near_Horizon_t82_t91": calculate_metrics(
                 Y_phys[80:90], Yp_phys[80:90], M_spat[80:90], clip_max),
@@ -429,7 +436,6 @@ def run_pipeline(grid, seed, cytokine):
         json.dump(results, f, indent=4)
     model.save(str(out_dir / f"weights_{suffix}"))
     print(f"Done! Saved: models/pinn/res_{suffix}.json")
-
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
