@@ -15,6 +15,13 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 dde.config.set_default_float("float64")
 dde.config.disable_xla_jit()
 
+gpus = tf.config.list_physical_devices('GPU')
+for gpu in gpus:
+    try:
+        tf.config.experimental.set_memory_growth(gpu, True)
+    except RuntimeError:
+        pass
+
 N_TRIALS    = 20
 TUNE_ITERS  = 2_000
 FULL_ITERS  = 15_000
@@ -23,6 +30,8 @@ N_OBS_PER_T = 100
 N_DOMAIN    = 5_000
 N_BOUNDARY  = 1_000
 N_INITIAL   = 0
+TUNE_N_DOMAIN   = 1_000
+TUNE_N_BOUNDARY = 200
 
 TRUE_SIZE = 5.0
 S_MCS     = 60.0
@@ -187,7 +196,8 @@ def build_dde_model(G, hidden, n_layers, lr,
                     X_ic, Y_ic_obs,
                     X_obs, Y_obs,
                     bc_fn,
-                    lambda_pde=0.01, lambda_ic=1.0, lambda_bc=0.1):
+                    lambda_pde=0.01, lambda_ic=1.0, lambda_bc=0.1,
+                    num_domain=N_DOMAIN, num_boundary=N_BOUNDARY):
 
     ic_bc  = dde.PointSetBC(X_ic, Y_ic_obs, component=0)
     neu_bc = dde.NeumannBC(geomtime,
@@ -198,8 +208,8 @@ def build_dde_model(G, hidden, n_layers, lr,
     data = dde.data.TimePDE(
         geomtime, pde_fn,
         ic_bcs=[ic_bc, neu_bc, obs_bc],
-        num_domain=N_DOMAIN,
-        num_boundary=N_BOUNDARY,
+        num_domain=num_domain,
+        num_boundary=num_boundary,
         num_initial=N_INITIAL,
         train_distribution="uniform",
     )
@@ -236,7 +246,12 @@ def make_objective(G, cyt_idx, pde_fn, geomtime,
 
     def objective(trial):
         set_seed(seed)
-        tf.keras.backend.clear_session(); gc.collect()
+        tf.keras.backend.clear_session()
+        gc.collect()
+        try:
+            tf.config.experimental.reset_memory_stats('GPU:0')
+        except Exception:
+            pass
 
         hidden     = trial.suggest_categorical("hidden",        [50, 64, 128])
         n_layers   = trial.suggest_categorical("n_layers",      [3, 4])
@@ -254,6 +269,8 @@ def make_objective(G, cyt_idx, pde_fn, geomtime,
             lambda_pde=lambda_pde,
             lambda_ic=lambda_ic,
             lambda_bc=lambda_bc,
+            num_domain=TUNE_N_DOMAIN,
+            num_boundary=TUNE_N_BOUNDARY,
         )
         model.train(iterations=TUNE_ITERS, display_every=TUNE_ITERS + 1)
 
@@ -265,6 +282,9 @@ def make_objective(G, cyt_idx, pde_fn, geomtime,
             Yp  = model.predict(X_q) 
             Yt  = Y_tgt_scaled[vi, :, :, cyt_idx].reshape(-1, 1).astype(np.float64)
             mses.append(float(np.mean((Yt - Yp) ** 2)))
+
+        del model
+        gc.collect()
         return float(np.mean(mses))
 
     return objective
@@ -279,7 +299,7 @@ def run_pipeline(grid, seed, cytokine):
     print(f"\n[{cytokine.upper()}] {grid}x{grid} — loading data...")
 
     Y_tgt  = np.load(data_path / "Y_target.npy").astype(np.float64)         # (99,G,G,6) scaled
-    M_spat = np.load(data_path / "Y_masks_spatial.npy").astype(np.float64)  # (99,G,G,5)
+    M_spat = np.load(data_path / "Y_masks_spatial.npy").astype(np.float64)   # (99,G,G,5)
     M_pinn = np.load(data_path / "Y_masks_pinn.npy").astype(np.float64)     # (99,G*G,5)
     Y_ic_full = np.load(data_path / "Y_ic.npy").astype(np.float64)          # (G,G,6) scaled
 
@@ -313,23 +333,45 @@ def run_pipeline(grid, seed, cytokine):
     Y_ic_obs = Y_ic_full[:, :, cyt_idx].reshape(G2, 1).astype(np.float64)  # scaled
 
     rng = np.random.default_rng(seed)
-    train_indices = list(range(70))
     val_indices   = list(range(70, 80))
+    train_indices = list(range(70))
+
+    # Consistent observation budget across grid resolutions.
+    # PINN natively works with sparse observations — we keep ALL 70 training
+    # timesteps but subsample spatial points per timestep to a fixed budget.
+    # This ensures:
+    #   - Same total observation count regardless of grid size → comparable results
+    #   - Full temporal coverage (all 70 timesteps) → no information loss in time
+    #   - Uniform random spatial coverage → unbiased spatial representation
+    #
+    # Budget: min(G², 2500) points per timestep (50×50 uses full grid as baseline)
+    #   50×50   → 2,500 pts/t × 70 = 175,000 total (full grid, no subsampling)
+    #   100×100 → 2,500 pts/t × 70 = 175,000 total (25% spatial subsampling)
+    #   250×250 → 2,500 pts/t × 70 = 175,000 total (4% spatial subsampling)
+    OBS_PTS_PER_T = min(G2, 2500)
+    subsample = OBS_PTS_PER_T < G2
 
     X_obs_list = []; Y_obs_list = []
     for i in train_indices:
         abs_t = i + 2  # absolute timestep
-        t_obs = np.full((G2, 1), t_norm_all[abs_t], np.float64)
-        X_obs_list.append(np.hstack([xy_grid, t_obs]))
-        Y_obs_list.append(
-            Y_tgt[i, :, :, cyt_idx].reshape(G2, 1).astype(np.float64)
-        )
+        if subsample:
+            idx_spatial = rng.choice(G2, size=OBS_PTS_PER_T, replace=False)
+            xy_sub = xy_grid[idx_spatial]
+            y_sub  = Y_tgt[i, :, :, cyt_idx].reshape(G2, 1).astype(np.float64)[idx_spatial]
+        else:
+            xy_sub = xy_grid
+            y_sub  = Y_tgt[i, :, :, cyt_idx].reshape(G2, 1).astype(np.float64)
+
+        t_obs = np.full((OBS_PTS_PER_T, 1), t_norm_all[abs_t], np.float64)
+        X_obs_list.append(np.hstack([xy_sub, t_obs]))
+        Y_obs_list.append(y_sub)
 
     X_obs_tr = np.vstack(X_obs_list)
     Y_obs_tr = np.vstack(Y_obs_list)
 
-    print(f"  Train obs: {X_obs_tr.shape[0]}  |  IC points: {X_ic.shape[0]}")
-    print(f"  Grid: {grid}x{grid}={G2}  |  clip_max: {clip_max:.6f}")
+    print(f"  Train obs: {X_obs_tr.shape[0]:,} ({OBS_PTS_PER_T} pts/t × {len(train_indices)} timesteps"
+          f"{', subsampled' if subsample else ', full grid'})")
+    print(f"  IC points: {X_ic.shape[0]}  |  Grid: {grid}x{grid}={G2}  |  clip_max: {clip_max:.6f}")
 
     print(f"Optuna: {N_TRIALS} trials x {TUNE_ITERS} iters...")
     study = optuna.create_study(
@@ -342,7 +384,7 @@ def run_pipeline(grid, seed, cytokine):
             grid, cyt_idx, pde_fn, geomtime,
             X_ic, Y_ic_obs,
             X_obs_tr, Y_obs_tr,
-            Y_tgt,                # scaled targets for validation
+            Y_tgt,                
             val_indices=val_indices,
             bc_fn=bc_fn, seed=seed,
         ),
@@ -401,7 +443,7 @@ def run_pipeline(grid, seed, cytokine):
         print(f"  Restoring from: {restore_path}")
         model.restore(restore_path, verbose=1)
     else:
-        print(f"  WARNING: No checkpoint found for step {best_step}, using final weights.")
+        print(f"WARNING: No checkpoint found for step {best_step}, using final weights.")
 
     print("Predicting full grid...")
     Yp_all = np.zeros((N, grid, grid, 1), dtype=np.float64)
@@ -414,7 +456,6 @@ def run_pipeline(grid, seed, cytokine):
     Y_phys  = denormalize(Y_tgt[..., cyt_idx:cyt_idx + 1], clip_max)
     Yp_phys = denormalize(Yp_all, clip_max)
 
-    # test windows
     suffix = f"{cytokine}_{grid}_{seed}"
     train_elapsed = time.time() - t_start
     print(f"  Training + prediction time: {train_elapsed:.1f}s")
