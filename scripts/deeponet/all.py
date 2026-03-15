@@ -296,20 +296,28 @@ def run_pipeline(grid, seed, cytokine):
     Xbr_tr, Xtr_tr, Yf_tr = Xbranch[:70],   Xtrunk[:70],   Yf[:70]
     Xbr_vl, Xtr_vl, Yf_vl = Xbranch[70:80], Xtrunk[70:80], Yf[70:80]
 
-    print(f"Optuna: {N_TRIALS} trials × {TUNE_EPOCHS} epochs...")
-    study = optuna.create_study(
-        direction="minimize",
-        sampler=optuna.samplers.TPESampler(seed=seed),
-        pruner=optuna.pruners.MedianPruner(n_warmup_steps=5),
-    )
-    study.optimize(
-        make_objective(Xbr_tr, Xtr_tr, Yf_tr, Xbr_vl, Xtr_vl, Yf_vl, seed),
-        n_trials=N_TRIALS, show_progress_bar=True, catch=(Exception,),
-    )
-    best = study.best_params
-    print(f"  Best: {best}  |  val_loss = {study.best_value:.6f}")
+    if seed == 42:
+        print(f"Optuna: {N_TRIALS} trials × {TUNE_EPOCHS} epochs...")
+        study = optuna.create_study(
+            direction="minimize",
+            sampler=optuna.samplers.TPESampler(seed=42),
+            pruner=optuna.pruners.MedianPruner(n_warmup_steps=5),
+        )
+        study.optimize(
+            make_objective(Xbr_tr, Xtr_tr, Yf_tr, Xbr_vl, Xtr_vl, Yf_vl, 42),
+            n_trials=N_TRIALS, show_progress_bar=True, catch=(Exception,),
+        )
+        best = study.best_params
+        optuna_val = float(study.best_value)
+        print(f"  Best: {best}  |  val_loss = {optuna_val:.6f}")
+    else:
+        ref_path = out_dir / f"res_{cytokine}_{grid}_42.json"
+        print(f"  Loading HP from {ref_path.name}")
+        with open(ref_path) as f:
+            ref = json.load(f)
+        best = ref["best_params"]
+        optuna_val = ref["optuna_best_val_loss"]
 
-    #final training 
     tf.keras.backend.clear_session(); set_seed(seed)
 
     t_start = time.time()
@@ -339,7 +347,7 @@ def run_pipeline(grid, seed, cytokine):
     results = {
         "grid": grid, "seed": seed, "cytokine": cytokine,
         "best_params":          best,
-        "optuna_best_val_loss": float(study.best_value),
+        "optuna_best_val_loss": optuna_val,
         "train_time_seconds":   round(train_elapsed, 2),
         "results": {
             "Near_Horizon_t82_t91": calculate_metrics(

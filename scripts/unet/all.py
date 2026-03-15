@@ -236,25 +236,29 @@ def run_pipeline(grid: int, seed: int, cytokine: str):
     X_train, Y_train = X[:70],   Y[:70]
     X_val,   Y_val   = X[70:80], Y[70:80]
 
-    # optuna
-    print(f"\nOptuna [{cytokine.upper()}] {grid}x{grid} — "
-          f"{N_TRIALS} trials × {TUNE_EPOCHS} epochs...")
+    if seed == 42:
+        print(f"\nOptuna [{cytokine.upper()}] {grid}x{grid} — "
+              f"{N_TRIALS} trials × {TUNE_EPOCHS} epochs...")
+        study = optuna.create_study(
+            direction="minimize",
+            sampler=optuna.samplers.TPESampler(seed=42),
+            pruner=optuna.pruners.MedianPruner(n_warmup_steps=5),
+        )
+        study.optimize(
+            make_objective(X_train, Y_train, X_val, Y_val, grid, 42),
+            n_trials=N_TRIALS, show_progress_bar=True,
+        )
+        best = study.best_params
+        optuna_val = float(study.best_value)
+        print(f"  Best: {best}  |  val_loss = {optuna_val:.6f}")
+    else:
+        ref_path = out_dir / f"res_{cytokine}_{grid}_42.json"
+        print(f"  Loading HP from {ref_path.name}")
+        with open(ref_path) as f:
+            ref = json.load(f)
+        best = ref["best_params"]
+        optuna_val = ref["optuna_best_val_loss"]
 
-    study = optuna.create_study(
-        direction="minimize",
-        sampler=optuna.samplers.TPESampler(seed=seed),
-        pruner=optuna.pruners.MedianPruner(n_warmup_steps=5),
-    )
-    study.optimize(
-        make_objective(X_train, Y_train, X_val, Y_val, grid, seed),
-        n_trials=N_TRIALS,
-        show_progress_bar=True,
-    )
-
-    best = study.best_params
-    print(f"  Best: {best}  |  val_loss = {study.best_value:.6f}")
-
-    # final train
     tf.keras.backend.clear_session()
     set_seed(seed)
 
@@ -296,14 +300,14 @@ def run_pipeline(grid: int, seed: int, cytokine: str):
 
     suffix = f"{cytokine}_{grid}_{seed}"
     train_elapsed = time.time() - t_start
-    print(f"  Training + prediction time: {train_elapsed:.1f}s")
+    print(f"Training + prediction time: {train_elapsed:.1f}s")
 
     results = {
         "grid":                 grid,
         "seed":                 seed,
         "cytokine":             cytokine,
         "best_params":          best,
-        "optuna_best_val_loss": float(study.best_value),
+        "optuna_best_val_loss": optuna_val,
         "train_time_seconds":   round(train_elapsed, 2),
         "results": {
             "Near_Horizon_t82_t91": calculate_metrics(
