@@ -373,25 +373,34 @@ def run_pipeline(grid, seed, cytokine):
           f"{', subsampled' if subsample else ', full grid'})")
     print(f"  IC points: {X_ic.shape[0]}  |  Grid: {grid}x{grid}={G2}  |  clip_max: {clip_max:.6f}")
 
-    print(f"Optuna: {N_TRIALS} trials x {TUNE_ITERS} iters...")
-    study = optuna.create_study(
-        direction="minimize",
-        sampler=optuna.samplers.TPESampler(seed=seed),
-        pruner=optuna.pruners.MedianPruner(n_warmup_steps=3),
-    )
-    study.optimize(
-        make_objective(
-            grid, cyt_idx, pde_fn, geomtime,
-            X_ic, Y_ic_obs,
-            X_obs_tr, Y_obs_tr,
-            Y_tgt,                
-            val_indices=val_indices,
-            bc_fn=bc_fn, seed=seed,
-        ),
-        n_trials=N_TRIALS, show_progress_bar=True, catch=(Exception,),
-    )
-    best = study.best_params
-    print(f"  Best: {best}  |  val_loss = {study.best_value:.6f}")
+    if seed == 42:
+        print(f"Optuna: {N_TRIALS} trials x {TUNE_ITERS} iters...")
+        study = optuna.create_study(
+            direction="minimize",
+            sampler=optuna.samplers.TPESampler(seed=42),
+            pruner=optuna.pruners.MedianPruner(n_warmup_steps=3),
+        )
+        study.optimize(
+            make_objective(
+                grid, cyt_idx, pde_fn, geomtime,
+                X_ic, Y_ic_obs,
+                X_obs_tr, Y_obs_tr,
+                Y_tgt,
+                val_indices=val_indices,
+                bc_fn=bc_fn, seed=42,
+            ),
+            n_trials=N_TRIALS, show_progress_bar=True, catch=(Exception,),
+        )
+        best = study.best_params
+        optuna_val = float(study.best_value)
+        print(f"  Best: {best}  |  val_loss = {optuna_val:.6f}")
+    else:
+        ref_path = out_dir / f"res_{cytokine}_{grid}_42.json"
+        print(f"  Loading HP from {ref_path.name}")
+        with open(ref_path) as f:
+            ref = json.load(f)
+        best = ref["best_params"]
+        optuna_val = ref["optuna_best_val_loss"]
 
     tf.keras.backend.clear_session(); set_seed(seed)
 
@@ -463,7 +472,7 @@ def run_pipeline(grid, seed, cytokine):
     results = {
         "grid": grid, "seed": seed, "cytokine": cytokine,
         "best_params":          best,
-        "optuna_best_val_loss": float(study.best_value),
+        "optuna_best_val_loss": optuna_val,
         "train_time_seconds":   round(train_elapsed, 2),
         "results": {
             "Near_Horizon_t82_t91": calculate_metrics(
