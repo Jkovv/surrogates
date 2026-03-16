@@ -1,0 +1,19 @@
+{
+    "model": "unet",
+    "grid": 250,
+    "cytokine": "il8",
+    "seed": 1,
+    "n_samples": 99,
+    "train_time_seconds": 60.57,
+    "pred_time_seconds": 0.6145,
+    "pred_time_std": 0.0226,
+    "pred_per_sample_ms": 6.207,
+    "total_time_seconds": 61.18,
+    "pred_runs": [
+        0.6395,
+        0.5939,
+        0.5836,
+        0.6378,
+        0.6175
+    ]
+}

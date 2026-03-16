@@ -1,0 +1,19 @@
+{
+    "model": "pinn",
+    "grid": 250,
+    "cytokine": "il10",
+    "seed": 100,
+    "n_samples": 99,
+    "train_time_seconds": 3043.79,
+    "pred_time_seconds": 0.2615,
+    "pred_time_std": 0.0018,
+    "pred_per_sample_ms": 2.6414,
+    "total_time_seconds": 3044.05,
+    "pred_runs": [
+        0.262,
+        0.264,
+        0.2622,
+        0.2607,
+        0.2586
+    ]
+}

@@ -1,0 +1,19 @@
+{
+    "model": "deeponet",
+    "grid": 100,
+    "cytokine": "il8",
+    "seed": 100,
+    "n_samples": 99,
+    "train_time_seconds": 783.14,
+    "pred_time_seconds": 2.7254,
+    "pred_time_std": 0.0017,
+    "pred_per_sample_ms": 27.5295,
+    "total_time_seconds": 785.87,
+    "pred_runs": [
+        2.7266,
+        2.727,
+        2.7247,
+        2.7225,
+        2.7263
+    ]
+}

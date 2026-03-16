@@ -11,7 +11,6 @@ EVAL_CHUNK = 4096
 N_WARMUP = 2
 N_RUNS = 5
 
-# model definitions for loading weights
 
 # STA-LSTM
 class SpatialAttention(tf.keras.layers.Layer):
@@ -134,8 +133,6 @@ def build_trunk_inputs(Xb, Xt):
     return np.concatenate([Xt[:, :, :2].astype(np.float32), vals], axis=-1)
 
 
-# pred functions
-
 def predict_sta_lstm(model, X):
     return model.predict(X, batch_size=2, verbose=0)
 
@@ -190,7 +187,7 @@ def main():
     print(f"Benchmarking {args.model.upper()} | {grid}x{grid} | {args.cytokine} | seed {args.seed}")
     print(f"  HP: {bp}")
 
-    # load model + weights
+    # loading models + weights
     if args.model == "sta_lstm":
         X = np.load(data_path / "X_lstm.npy").astype(np.float32)
         model = STALSTM(grid_size=grid, filters=bp["filters"], lstm_units=bp["lstm_units"])
@@ -303,20 +300,20 @@ def main():
                     candidates.append((0, f))
         if candidates:
             candidates.sort(key=lambda x: x[0], reverse=True)
-            print(f"Loading: {Path(candidates[0][1]).name}")
+            print(f"  Loading: {Path(candidates[0][1]).name}")
             pinn_model.net.load_weights(candidates[0][1])
         else:
-            print(f"WARNING: no weights found, using random init")
+            print(f"  WARNING: no weights found, using random init")
 
         model = pinn_model
         def do_predict(): return predict_pinn(model, xy_grid, G2, N)
 
-    # Warmup
+    # warmup
     print(f"Warmup ({N_WARMUP} runs)...")
     for _ in range(N_WARMUP):
         do_predict()
 
-    # Timed runs
+    # timed runs
     print(f"Timing ({N_RUNS} runs)...")
     times = []
     for r in range(N_RUNS):
@@ -324,12 +321,12 @@ def main():
         do_predict()
         elapsed = time.time() - t0
         times.append(elapsed)
-        print(f"Run {r+1}: {elapsed:.3f}s")
+        print(f"    Run {r+1}: {elapsed:.3f}s")
 
     mean_pred = float(np.mean(times))
     std_pred = float(np.std(times))
 
-    # loading train_time_seconds from res json (this was train+pred combined)
+    # train_time_seconds from res json (this was train+pred combined)
     with open(res_path) as f:
         res_data = json.load(f)
     total_time = res_data.get("train_time_seconds", None)
