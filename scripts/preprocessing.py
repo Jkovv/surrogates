@@ -80,6 +80,10 @@ def process_grid(folder_name: str):
     for i, fname in enumerate(vtk_files):
         mesh = pv.read(str(data_path / fname))
         for j, ck in enumerate(CYTOKINE_NAMES):
+            # FiPy Grid2D numbers cells column-major (x varies fastest): flat[j*G + i] = cell(i,j).
+            # order="F" maps this correctly: result[i, j] = flat[j*G + i] = value at (x=i, y=j).
+            # Y_masks_pinn reshape (C-order) then gives pinn[t, i*G+j] = spatial[t, i, j],
+            # consistent with PINN's flat_idx = ix*G + iy. Verified — no index mismatch.
             raw_cyt[i, :, :, j] = mesh.point_data[ck].reshape(G, G, order="F")
         if "CellType" in mesh.point_data:
             ct = mesh.point_data["CellType"].reshape(G, G, order="F")

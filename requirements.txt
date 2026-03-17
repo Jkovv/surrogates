@@ -1,0 +1,18 @@
+# Core ML / physics-informed
+tensorflow>=2.13.0
+deepxde>=1.10.0
+
+# Hyperparameter optimisation
+optuna==4.7.0
+
+# Numerics & data
+numpy==2.2.6
+scipy==1.15.3
+scikit-learn==1.7.2
+scikit-image>=0.21.0
+
+# Data loading
+pyvista==0.47.0
+
+# Visualisation
+matplotlib==3.10.8
