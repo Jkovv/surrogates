@@ -1,5 +1,6 @@
 # Core ML / physics-informed
 tensorflow>=2.13.0
+tensorflow-probability==0.23.0
 deepxde>=1.10.0
 
 # Hyperparameter optimisation
@@ -10,9 +11,15 @@ numpy==2.2.6
 scipy==1.15.3
 scikit-learn==1.7.2
 scikit-image>=0.21.0
+pandas
 
 # Data loading
 pyvista==0.47.0
 
 # Visualisation
 matplotlib==3.10.8
+
+# Visualization & Mesh
+pyvista==0.47.0
+matplotlib==3.10.8
+seaborn
