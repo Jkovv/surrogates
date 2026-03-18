@@ -1,2 +1,7 @@
 *.h5
 *.weights.h5
+.env
+.venv
+.claude
+__pycache__
+scripts/500x500
