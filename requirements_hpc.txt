@@ -1,21 +1,16 @@
-# Core ML / physics-informed
+# HPC requirements for Snellius (Python 3.9 — no pyvista, no VTK loading)
+# Preprocessing is done locally; only model training runs here.
+
 tensorflow>=2.13.0
 tensorflow-probability==0.23.0
 deepxde>=1.10.0
 
-# Hyperparameter optimisation
 optuna==4.7.0
 
-# Numerics & data
 numpy>=1.24.0
 scipy>=1.10.0
 scikit-learn>=1.2.0
 scikit-image>=0.21.0
 pandas
-
-# Data loading
-pyvista==0.47.0
-
-# Visualisation
 matplotlib>=3.7.0
 seaborn

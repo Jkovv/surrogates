@@ -1,0 +1,50 @@
+{
+    "grid": 500,
+    "seed": 1,
+    "cytokine": "il8",
+    "best_params": {
+        "filters": 64,
+        "lstm_units": 128,
+        "lr": 0.0006564339077069611,
+        "batch_size": 2
+    },
+    "train_time_seconds": 4400.52,
+    "pred_time_seconds": 3.3291,
+    "split": {
+        "n_train": 140,
+        "n_val": 20,
+        "n_test": 39
+    },
+    "results": {
+        "Window1_t162_t174": {
+            "Global_R2": 0.9912494193957223,
+            "Masked_RMSE": 8.233444467986203e-10,
+            "Unmasked_RMSE": 1.4489393420859477e-10,
+            "Avg_Dice": 0.9984580122277387,
+            "Dice_Empty_Skipped": 0,
+            "Spatial_Correlation": 0.9987405945600976,
+            "SSIM": 0.9541269493118426,
+            "SSIM_Skipped_Frames": 0
+        },
+        "Window2_t175_t187": {
+            "Global_R2": 0.982884230338982,
+            "Masked_RMSE": 9.65522017965838e-10,
+            "Unmasked_RMSE": 2.1164546099851934e-10,
+            "Avg_Dice": 0.9976114931627187,
+            "Dice_Empty_Skipped": 0,
+            "Spatial_Correlation": 0.9983482083157531,
+            "SSIM": 0.94279109194909,
+            "SSIM_Skipped_Frames": 0
+        },
+        "Window3_t188_t200": {
+            "Global_R2": 0.9710380510468233,
+            "Masked_RMSE": 1.1007707313770819e-09,
+            "Unmasked_RMSE": 2.8642979921917857e-10,
+            "Avg_Dice": 0.9963707971583777,
+            "Dice_Empty_Skipped": 0,
+            "Spatial_Correlation": 0.9978994352472567,
+            "SSIM": 0.9315897456277615,
+            "SSIM_Skipped_Frames": 0
+        }
+    }
+}
