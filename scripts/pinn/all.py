@@ -165,7 +165,6 @@ def make_pde_1cyt(D, k, s1_tf, s2_tf, e_tf, G, T):
 
     return pde
 
-
 # metrics
 def _fisher_z(r):
     r = np.clip(r, -0.9999, 0.9999)
@@ -352,7 +351,7 @@ def run_pipeline(grid, seed, cytokine):
     set_seed(seed)
     cyt_idx = CYTOKINE_NAMES.index(cytokine.lower())
 
-    data_path = Path(f"./preprocessed/{grid}x{grid}")
+    data_path = Path(f"./preprocessed/{grid}x{grid}") # preprocessing.py
     out_dir   = Path("./models/pinn"); out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n[{cytokine.upper()}] {grid}x{grid} — loading data...")
