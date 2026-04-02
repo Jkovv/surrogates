@@ -1,13 +1,6 @@
-"""
-DeepONet – 500×500 Snellius run
-Adaptations vs all.py:
-  - X_branch memory-mapped (never fully loaded into RAM)
-  - Branch stats pre-computed once and cached as (99,7)
-  - chunk_size capped at 1024; Optuna p <= 128
-  - set_memory_growth enabled
-  - --data-dir argument to point at scan-iteration preprocessed folder
-"""
-import argparse, json, gc, os, sys, time
+import argparse, json, gc, os, random, time
+from pathlib import Path
+
 import numpy as np
 import tensorflow as tf
 import optuna
@@ -15,250 +8,232 @@ from sklearn.metrics import r2_score
 from scipy.stats import pearsonr
 from skimage.metrics import structural_similarity as ssim
 
-optuna.logging.set_verbosity(optuna.logging.WARNING)
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+tf.config.optimizer.set_jit(False)
 
-# ── constants ──────────────────────────────────────────────────────────────
-GRID         = 500
-G2           = GRID * GRID
-DATA_DIR     = "preprocessed/500x500"   # overridden by --data-dir
-RESULTS_DIR  = "models/deeponet_h"
-CYT_MAP      = {"il8": 0, "il10": 3}
-TRAIN_SL     = slice(0, 140)
-VAL_SL       = slice(140, 160)
-TEST_SL      = slice(160, 199)
-N_OPTUNA     = 20
-TUNE_EPOCHS  = 30
-FULL_EPOCHS  = 400
-PATIENCE     = 40
-LR_PATIENCE  = 15
-CHUNK_SIZE   = 1024          # max spatial points per forward pass on GPU
+gpus = tf.config.list_physical_devices('GPU')
+for gpu in gpus:
+    try:
+        tf.config.experimental.set_memory_growth(gpu, True)
+    except RuntimeError:
+        pass
 
-# ── GPU setup ─────────────────────────────────────────────────────────────
-tf.config.set_visible_devices([], "GPU")  # CPU-only (rome partition)
+CYT_NAMES = ["il8", "il1", "il6", "il10", "tnf", "tgf"]
+N_OPTUNA = 20
+TUNE_EPOCHS = 30
+FULL_EPOCHS = 400
+PATIENCE = 40
+LR_PATIENCE = 15
+EVAL_CHUNK = 4096
 
-# ── helpers ────────────────────────────────────────────────────────────────
-def load_data(cyt_idx):
-    """Load all arrays needed for DeepONet. X_branch is memory-mapped."""
-    md   = json.load(open(f"{DATA_DIR}/metadata.json"))
-    clip = float(md["clip_max"][cyt_idx])
+def set_seed(seed):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed); np.random.seed(seed); tf.random.set_seed(seed)
 
-    # Memory-map the large array — never fully materialised
-    Xb   = np.load(f"{DATA_DIR}/X_branch.npy", mmap_mode="r")  # (99,2,G,G,11)
-    Xt   = np.load(f"{DATA_DIR}/X_trunk.npy")                   # (99,G²,3)
-    Yt   = np.load(f"{DATA_DIR}/Y_target.npy")[..., cyt_idx]    # (99,G,G)
-    Yraw = np.load(f"{DATA_DIR}/Y_raw_phys.npy")[1:, ..., cyt_idx]  # (99,G,G)
-    masks = np.load(f"{DATA_DIR}/Y_masks_spatial.npy")          # (99,G,G,5)
-    t_norm = np.linspace(0, 1, 199, dtype=np.float32)
+class Branch(tf.keras.layers.Layer):
+    def __init__(self, hidden, p, **kw):
+        super().__init__(**kw)
+        self.fc1 = tf.keras.layers.Dense(hidden, activation="relu")
+        self.fc2 = tf.keras.layers.Dense(p, activation="linear")
+    def call(self, x, training=False):
+        return self.fc2(self.fc1(x))
 
-    # Pre-compute branch stats once (shape: 199×7)  — avoids loading 5.24 GB
-    print("Computing branch statistics (mmap'd)...")
-    branch_stats = np.zeros((199, 7), dtype=np.float32)
-    for i in range(199):
-        f0 = Xb[i, 0, :, :, cyt_idx].astype(np.float32)  # first frame
-        branch_stats[i, 0] = float(np.max(f0))
-        branch_stats[i, 1] = float(np.mean(f0))
-        branch_stats[i, 2] = float(np.std(f0))
-        ys, xs = np.mgrid[0:GRID, 0:GRID]
-        total   = float(np.sum(np.abs(f0))) + 1e-12
-        branch_stats[i, 3] = float(np.sum(xs * np.abs(f0))) / total  # centroid x
-        branch_stats[i, 4] = float(np.sum(ys * np.abs(f0))) / total  # centroid y
-        branch_stats[i, 5] = float(np.sum(f0 > 0.01)) / G2           # extent
-        branch_stats[i, 6] = t_norm[i]
+class Trunk(tf.keras.layers.Layer):
+    def __init__(self, hidden, p, **kw):
+        super().__init__(**kw)
+        self.U = tf.keras.layers.Dense(hidden, activation="tanh")
+        self.V = tf.keras.layers.Dense(hidden, activation="tanh")
+        self.W1a = tf.keras.layers.Dense(hidden, activation="relu")
+        self.W1b = tf.keras.layers.Dense(hidden, activation="linear")
+        self.W2a = tf.keras.layers.Dense(hidden, activation="relu")
+        self.W2b = tf.keras.layers.Dense(hidden, activation="linear")
+        self.out = tf.keras.layers.Dense(p, activation="linear")
+    def call(self, x):
+        u = self.U(x); v = self.V(x)
+        h = self.W1b(self.W1a(x)); h = h * u + (1.0 - h) * v
+        h = self.W2b(self.W2a(h)); h = h * u + (1.0 - h) * v
+        return self.out(h)
 
-    return branch_stats, Xt, Yt, Yraw, masks, clip
+class DeepONet(tf.keras.Model):
+    def __init__(self, hidden, p):
+        super().__init__()
+        self.branch = Branch(hidden, p)
+        self.trunk = Trunk(hidden, p)
+        self.bias = self.add_weight(shape=(1,), initializer="zeros", trainable=True, name="bias")
+    def call(self, inputs, training=False):
+        xb, xt = inputs
+        b = self.branch(xb, training=training)
+        t = self.trunk(xt)
+        r = tf.einsum("bp,bnp->bn", b, t) + self.bias
+        return tf.expand_dims(r, -1)
 
+def load_data(data_dir, cyt_idx):
+    md = json.load(open(f"{data_dir}/metadata.json"))
+    clip = float(md["clip_max"][cyt_idx]) if "clip_max" in md else float(md["scaling"]["max"][cyt_idx])
+    G = int(md["grid"]); G2 = G * G; N = int(md["n_samples"])
+    Xb = np.load(f"{data_dir}/X_branch.npy", mmap_mode="r")
+    Xt = np.load(f"{data_dir}/X_trunk.npy")
+    Yt = np.load(f"{data_dir}/Y_target.npy")[..., cyt_idx]
+    masks = np.load(f"{data_dir}/Y_masks_spatial.npy")
+    return Xb, Xt, Yt, masks, clip, G, G2, N
 
-def build_model(p, hidden):
-    # Branch net
-    b_in  = tf.keras.Input(shape=(7,), name="branch_in")
-    b     = tf.keras.layers.Dense(hidden, activation="relu")(b_in)
-    b_out = tf.keras.layers.Dense(p, activation="linear")(b)
+def build_branch_stats(Xb_mmap, Xt, cyt_idx, G, G2, N):
+    stats = np.zeros((N, 7), dtype=np.float32)
+    xs_g, ys_g = np.linspace(0, 1, G, dtype=np.float32), np.linspace(0, 1, G, dtype=np.float32)
+    xx, yy = np.meshgrid(xs_g, ys_g, indexing='ij')
+    for i in range(N):
+        f0 = Xb_mmap[i, 0, :, :, cyt_idx].astype(np.float32)
+        mask = (Xb_mmap[i, 0, :, :, 6:].max(axis=-1) > 0.5).astype(np.float32)
+        na = float(np.sum(mask)) + 1e-6
+        stats[i, 0] = (float(np.max(f0)) + 1.0) / 2.0
+        stats[i, 1] = (float(np.mean(f0)) + 1.0) / 2.0
+        stats[i, 2] = float(np.std(f0))
+        stats[i, 3] = float(np.sum(xx * mask) / na)
+        stats[i, 4] = float(np.sum(yy * mask) / na)
+        stats[i, 5] = na / G2
+        stats[i, 6] = float(Xt[i, 0, 2])
+    return stats
 
-    # Trunk net (gated)
-    t_in  = tf.keras.Input(shape=(None, 24), name="trunk_in")
-    U     = tf.keras.layers.Dense(hidden, activation="tanh")(t_in)
-    V     = tf.keras.layers.Dense(hidden, activation="tanh")(t_in)
-    h     = tf.keras.layers.Dense(hidden, activation="relu")(t_in)
-    h     = tf.keras.layers.Dense(hidden, activation="linear")(h)
-    h     = h * U + (1.0 - h) * V
-    h     = tf.keras.layers.Dense(hidden, activation="relu")(h)
-    h     = tf.keras.layers.Dense(hidden, activation="linear")(h)
-    h     = h * U + (1.0 - h) * V
-    t_out = tf.keras.layers.Dense(p, activation="linear")(h)   # (B,G²,p)
+def build_trunk_for_sample(Xb_mmap, Xt, i, G2):
+    xy = Xt[i, :, :2]
+    sf = Xb_mmap[i].astype(np.float32).reshape(G2, 22)
+    return np.concatenate([xy, sf], axis=-1)
 
-    bias  = tf.Variable(tf.zeros([1]), trainable=True, name="dot_bias")
+def build_dataset(Xbranch, Xb_mmap, Xt, Yf, indices, batch_size, chunk_size, G2, shuffle=True):
+    chunks = list(range(0, G2, chunk_size))
+    def gen():
+        order = np.array(indices)
+        if shuffle: np.random.shuffle(order)
+        for i in order:
+            xb = Xbranch[i]
+            trunk_i = build_trunk_for_sample(Xb_mmap, Xt, i, G2)
+            y_i = Yf[i]
+            for s in chunks:
+                e = min(s + chunk_size, G2)
+                xt = trunk_i[s:e]
+                y = y_i[s:e]
+                size = e - s
+                if size < chunk_size:
+                    pad = chunk_size - size
+                    xt = np.concatenate([xt, np.zeros((pad, 24), np.float32)], axis=0)
+                    y = np.concatenate([y, np.zeros((pad, 1), np.float32)], axis=0)
+                yield (xb, xt, np.array([size], dtype=np.int32)), y
+    sig = ((tf.TensorSpec((7,), tf.float32), tf.TensorSpec((chunk_size, 24), tf.float32), tf.TensorSpec((1,), tf.int32)), tf.TensorSpec((chunk_size, 1), tf.float32))
+    return tf.data.Dataset.from_generator(gen, output_signature=sig).batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
-    class DotLayer(tf.keras.layers.Layer):
-        def call(self, inputs):
-            bv, tv = inputs
-            return tf.einsum("bp,bnp->bn", bv, tv) + bias
+def masked_mse(pred, y, sz):
+    mask = tf.sequence_mask(tf.squeeze(sz, -1), maxlen=tf.shape(pred)[1], dtype=tf.float32)
+    mask = tf.expand_dims(mask, -1)
+    return tf.reduce_sum(tf.square(pred - y) * mask) / (tf.reduce_sum(mask) + 1e-8)
 
-    out = DotLayer()([b_out, t_out])                           # (B, G²)
-    out = tf.keras.layers.Lambda(lambda x: tf.expand_dims(x, -1))(out)  # (B, G², 1)
-    return tf.keras.Model(inputs=[b_in, t_in], outputs=out)
+def do_train(model, opt, ds_tr, ds_vl, epochs, verbose=True):
+    @tf.function
+    def train_step(xb, xt, sz, y):
+        with tf.GradientTape() as tape:
+            loss = masked_mse(model([xb, xt], training=True), y, sz)
+        opt.apply_gradients(zip(tape.gradient(loss, model.trainable_variables), model.trainable_variables))
+        return loss
 
+    @tf.function
+    def val_step(xb, xt, sz, y):
+        return masked_mse(model([xb, xt], training=False), y, sz)
 
-def chunked_predict(model, b_feat, trunk_full, chunk=CHUNK_SIZE):
-    """Predict in spatial chunks to avoid VRAM OOM."""
-    results = []
-    for start in range(0, G2, chunk):
-        end   = min(start + chunk, G2)
-        t_ch  = trunk_full[:, start:end, :]            # (B, chunk, 24)
-        pred  = model([b_feat, t_ch], training=False)  # (B, chunk, 1)
-        results.append(pred.numpy())
-    return np.concatenate(results, axis=1)             # (B, G², 1)
-
-
-def build_trunk_input(Xb_mmap, Xt, indices):
-    """Build (len(indices), G², 24) trunk input from mmap'd X_branch."""
-    B  = len(indices)
-    xy = Xt[indices]                                    # (B, G², 3) — x,y,t
-    # Spatial features: X_branch frames → (B, 2, G, G, 11) → (B, G², 22)
-    sf = Xb_mmap[indices].astype(np.float32)           # (B, 2, G, G, 11)
-    sf = sf.reshape(B, G2, 22)
-    # Use only (x,y) from trunk; discard t (it's in branch already)
-    return np.concatenate([xy[:, :, :2], sf], axis=-1) # (B, G², 24)
-
-
-def train_model(model, Xb_mmap, Xt, Yt, bs, lr, Xb_stats):
-    opt = tf.keras.optimizers.Adam(lr)
-    tr_idx = np.arange(140)
-    vl_idx = np.arange(140, 160)
-    best_val, stagnant, best_w = 1e9, 0, None
-
-    for epoch in range(FULL_EPOCHS):
-        np.random.shuffle(tr_idx)
-        for start in range(0, 140, bs):
-            idx   = tr_idx[start:start+bs]
-            t_inp = build_trunk_input(Xb_mmap, Xt, idx).astype(np.float32)
-            y_inp = Yt[idx].reshape(len(idx), G2, 1).astype(np.float32)
-            b_inp = Xb_stats[idx]
-            with tf.GradientTape() as tape:
-                loss = tf.reduce_mean((model([b_inp, t_inp]) - y_inp)**2)
-            grads = tape.gradient(loss, model.trainable_variables)
-            opt.apply_gradients(zip(grads, model.trainable_variables))
-
-        # Validation
-        t_val   = build_trunk_input(Xb_mmap, Xt, vl_idx).astype(np.float32)
-        y_val   = Yt[vl_idx].reshape(20, G2, 1).astype(np.float32)
-        vl_pred = chunked_predict(model, Xb_stats[vl_idx], t_val)
-        vl      = float(np.mean((vl_pred - y_val) ** 2))
-
-        if vl < best_val - 1e-6:
-            best_val, stagnant, best_w = vl, 0, model.get_weights()
+    best_val = np.inf; best_w = None; wait = rw = 0
+    for ep in range(1, epochs + 1):
+        tr = np.mean([train_step(*b[0], b[1]) for b in ds_tr])
+        vl = np.mean([val_step(*b[0], b[1]) for b in ds_vl])
+        if verbose and ep % 10 == 0:
+            print(f"  Epoch {ep:4d}  loss={tr:.5f}  val={vl:.5f}", flush=True)
+        if vl < best_val:
+            best_val = vl; best_w = model.get_weights(); wait = rw = 0
         else:
-            stagnant += 1
-            if stagnant % LR_PATIENCE == 0:
-                opt.learning_rate.assign(opt.learning_rate * 0.5)
-            if stagnant >= PATIENCE:
-                break
+            wait += 1; rw += 1
+        if rw >= LR_PATIENCE:
+            opt.learning_rate.assign(opt.learning_rate * 0.5)
+            rw = 0
+        if wait >= PATIENCE: break
+    if best_w: model.set_weights(best_w)
+    return best_val
 
-    if best_w:
-        model.set_weights(best_w)
-    return model
+def predict_full(model, Xbranch, Xb_mmap, Xt, G2, N, chunk=EVAL_CHUNK):
+    out = np.zeros((N, G2, 1), np.float32)
+    for i in range(N):
+        xb = tf.constant(Xbranch[i:i+1])
+        trunk_i = build_trunk_for_sample(Xb_mmap, Xt, i, G2).astype(np.float32)
+        for s in range(0, G2, chunk):
+            e = min(s + chunk, G2)
+            xt = tf.constant(trunk_i[np.newaxis, s:e, :])
+            out[i, s:e] = model([xb, xt], training=False).numpy()[0]
+    return out
 
+def _fisher_z(r):
+    r = np.clip(r, -0.9999, 0.9999)
+    return 0.5 * np.log((1.0 + r) / (1.0 - r))
 
-def compute_metrics(y_true, y_pred, masks, clip_max):
-    yt = np.clip(y_true, 0, None)
-    yp = np.clip(y_pred, 0, None)
+def calculate_metrics(y_true, y_pred, masks, clip_max):
+    T = min(y_true.shape[0], y_pred.shape[0], masks.shape[0])
+    yt = y_true[:T]; yp = np.maximum(y_pred[:T], 0.0)
+    ms = np.max(masks[:T], axis=-1, keepdims=True)
+    sq = np.square(yt - yp)
+    rmse = float(np.sqrt(np.sum(sq * ms) / (np.sum(ms) + 1e-12)))
+    unmasked_rmse = float(np.sqrt(np.mean(sq)))
     r2 = float(r2_score(yt.flatten(), yp.flatten()))
-    rmse_u = float(np.sqrt(np.mean((yt - yp)**2)))
-    m = masks.sum(-1) > 0  # any cell present
-    if m.sum() > 0:
-        rmse_m = float(np.sqrt(np.sum((yt - yp)**2 * m) / (m.sum() + 1e-12)))
+    per_t_r2 = [float(r2_score(yt[t].flatten(), yp[t].flatten())) if np.std(yt[t]) > 1e-12 else float('nan') for t in range(T)]
+    dice_thr = 0.05 * clip_max if clip_max > 0 else 1e-9
+    dices, n_empty, z_corrs, ssims_v = [], 0, [], []
+    fixed_dr = float(clip_max) if clip_max > 0 else 1.0
+    for t in range(T):
+        gt, pr = yt[t, :, :, 0], yp[t, :, :, 0]
+        gb, pb = (gt > dice_thr).astype(float), (pr > dice_thr).astype(float)
+        if np.sum(gb) + np.sum(pb) == 0: n_empty += 1
+        else: dices.append(2.0 * np.sum(gb * pb) / (np.sum(gb) + np.sum(pb) + 1e-12))
+        if np.std(gt) > 1e-12 and np.std(pr) > 1e-12:
+            r_val = float(pearsonr(gt.flatten(), pr.flatten())[0])
+            if np.isfinite(r_val): z_corrs.append(_fisher_z(r_val))
+        if np.max(gt) - np.min(gt) > 1e-12: ssims_v.append(float(ssim(gt, pr, data_range=fixed_dr)))
+    return {
+        "Global_R2": r2, "Per_Timestep_R2": per_t_r2, "Masked_RMSE": rmse, "Unmasked_RMSE": unmasked_rmse,
+        "Avg_Dice": float(np.mean(dices)) if dices else 0.0, "Dice_Empty_Skipped": n_empty,
+        "Spatial_Correlation": float(np.tanh(np.mean(z_corrs))) if z_corrs else 0.0, "SSIM": float(np.mean(ssims_v)) if ssims_v else 0.0
+    }
+
+def run(data_dir, cytokine, seed):
+    set_seed(seed)
+    cyt_idx = CYT_NAMES.index(cytokine.lower())
+    out_dir = Path("./models/200hrs/deeponet_h")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    Xb_mmap, Xt, Yt, masks, clip, G, G2, N = load_data(data_dir, cyt_idx)
+    Xbranch = build_branch_stats(Xb_mmap, Xt, cyt_idx, G, G2, N)
+    Yf = Yt.reshape(N, G2, 1).astype(np.float32)
+    tr_idx, vl_idx = list(range(140)), list(range(140, 160))
+    if seed == 42:
+        def objective(trial):
+            set_seed(42); tf.keras.backend.clear_session()
+            p = trial.suggest_categorical("p", [64, 128]); h = trial.suggest_categorical("hidden", [128, 256])
+            lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True); bs = trial.suggest_categorical("batch_size", [4, 8])
+            cs = trial.suggest_categorical("chunk_size", [2048, 4096])
+            ds_tr = build_dataset(Xbranch, Xb_mmap, Xt, Yf, tr_idx, bs, cs, G2); ds_vl = build_dataset(Xbranch, Xb_mmap, Xt, Yf, vl_idx, bs, cs, G2, shuffle=False)
+            m = DeepONet(hidden=h, p=p); opt = tf.keras.optimizers.Adam(lr)
+            return do_train(m, opt, ds_tr, ds_vl, TUNE_EPOCHS, verbose=False)
+        study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=42))
+        study.optimize(objective, n_trials=N_OPTUNA); best = study.best_params; optuna_val = float(study.best_value)
     else:
-        rmse_m = rmse_u
-    ssim_vals = []
-    for t in range(yt.shape[0]):
-        if yt[t].std() > 1e-12:
-            ssim_vals.append(float(ssim(yt[t], yp[t], data_range=clip_max)))
-    ssim_avg = float(np.mean(ssim_vals)) if ssim_vals else 0.0
-    return {"Global_R2": r2, "Unmasked_RMSE": rmse_u, "Masked_RMSE": rmse_m, "SSIM": ssim_avg}
-
-
-# ── main ───────────────────────────────────────────────────────────────────
-def run(cyt_name, seed):
-    print(f"\n{'='*60}")
-    print(f"DeepONet 500x500 | cytokine={cyt_name} | seed={seed}")
-    print(f"{'='*60}")
-    tf.random.set_seed(seed)
-    np.random.seed(seed)
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-
-    cyt_idx = CYT_MAP[cyt_name]
-    Xb_stats, Xt, Yt, Yraw, masks, clip = load_data(cyt_idx)
-    Xb_mmap = np.load(f"{DATA_DIR}/X_branch.npy", mmap_mode="r")
-
-    def objective(trial):
-        p   = trial.suggest_categorical("p",    [64, 128])
-        h   = trial.suggest_categorical("hidden", [128, 256])
-        lr  = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
-        bs  = trial.suggest_categorical("batch_size", [4, 8])
-        m   = build_model(p, h)
-        opt = tf.keras.optimizers.Adam(lr)
-        tr_idx = np.arange(140)
-        for ep in range(TUNE_EPOCHS):
-            np.random.shuffle(tr_idx)
-            for s in range(0, 140, bs):
-                idx   = tr_idx[s:s+bs]
-                t_inp = build_trunk_input(Xb_mmap, Xt, idx).astype(np.float32)
-                y_inp = Yt[idx].reshape(len(idx), G2, 1).astype(np.float32)
-                with tf.GradientTape() as tape:
-                    loss = tf.reduce_mean((m([Xb_stats[idx], t_inp]) - y_inp)**2)
-                opt.apply_gradients(zip(tape.gradient(loss, m.trainable_variables), m.trainable_variables))
-        vl_idx   = np.arange(140, 160)
-        t_val    = build_trunk_input(Xb_mmap, Xt, vl_idx).astype(np.float32)
-        y_val    = Yt[vl_idx].reshape(20, G2, 1).astype(np.float32)
-        vl_pred  = chunked_predict(m, Xb_stats[vl_idx], t_val)
-        val_loss = float(np.mean((vl_pred - y_val) ** 2))
-        del m; gc.collect()
-        return float(val_loss)
-
-    study = optuna.create_study(direction="minimize",
-                                sampler=optuna.samplers.TPESampler(seed=seed),
-                                pruner=optuna.pruners.MedianPruner())
-    study.optimize(objective, n_trials=N_OPTUNA, show_progress_bar=False)
-    best = study.best_params
-    print(f"Best params: {best}")
-
-    model = build_model(best["p"], best["hidden"])
-    t_train_start = time.time()
-    model = train_model(model, Xb_mmap, Xt, Yt, best["batch_size"], best["lr"], Xb_stats)
-    train_elapsed = time.time() - t_train_start
-
-    # Evaluate on test set
-    test_idx  = np.arange(160, 199)
-    t_test    = build_trunk_input(Xb_mmap, Xt, test_idx).astype(np.float32)
-    t_pred_start = time.time()
-    pred_flat = chunked_predict(model, Xb_stats[test_idx], t_test)  # (39,G²,1)
-    pred_elapsed = time.time() - t_pred_start
-    pred      = pred_flat.reshape(39, GRID, GRID)
-    y_true    = Yraw[160:199]
-    pred_phys = (pred + 1.0) / 2.0 * clip
-    pred_phys = np.clip(pred_phys, 0, None)
-
-    metrics = compute_metrics(y_true, pred_phys, masks[160:199], clip)
-    metrics.update({"cytokine": cyt_name, "seed": seed, "grid": 500,
-                    "train_time_seconds": round(train_elapsed, 2),
-                    "pred_time_seconds":  round(pred_elapsed, 4),
-                    "best_params": best, "model": "deeponet_h"})
-
-    out_path = f"{RESULTS_DIR}/res_{cyt_name}_500_{seed}.json"
-    with open(out_path, "w") as f:
-        json.dump(metrics, f, indent=2)
-    print(f"Saved → {out_path}")
-    print(f"Results: {metrics}")
-
-    del model, Xb_mmap; gc.collect()
-
+        ref = json.load(open(out_dir / f"res_{cytokine}_{G}_42.json"))
+        best = ref["best_params"]; optuna_val = ref["optuna_best_val_loss"]
+    tf.keras.backend.clear_session(); set_seed(seed)
+    ds_tr = build_dataset(Xbranch, Xb_mmap, Xt, Yf, tr_idx, best["batch_size"], best["chunk_size"], G2)
+    ds_vl = build_dataset(Xbranch, Xb_mmap, Xt, Yf, vl_idx, best["batch_size"], best["chunk_size"], G2, shuffle=False)
+    model = DeepONet(hidden=best["hidden"], p=best["p"]); opt = tf.keras.optimizers.Adam(best["lr"])
+    t_start = time.time(); do_train(model, opt, ds_tr, ds_vl, FULL_EPOCHS); train_elapsed = time.time() - t_start
+    t_pred = time.time(); Yp_f = predict_full(model, Xbranch, Xb_mmap, Xt, G2, N); pred_elapsed = time.time() - t_pred
+    Y_ph = (Yt.reshape(N, G, G, 1) + 1.0) / 2.0 * clip; Yp_ph = (Yp_f.reshape(N, G, G, 1) + 1.0) / 2.0 * clip
+    res = {"grid": G, "seed": seed, "cytokine": cytokine, "best_params": best, "optuna_best_val_loss": optuna_val, "train_time_seconds": round(train_elapsed, 2), "pred_time_seconds": round(pred_elapsed, 2),
+           "results": {"Near_Horizon": calculate_metrics(Y_ph[160:180], Yp_ph[160:180], masks[160:180], clip), "Far_Horizon": calculate_metrics(Y_ph[180:199], Yp_ph[180:199], masks[180:199], clip)}}
+    json.dump(res, open(out_dir / f"res_{cytokine}_{G}_{seed}.json", "w"), indent=4)
+    model.save_weights(str(out_dir / f"weights_{cytokine}_{G}_{seed}.weights.h5"))
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--cytokine", choices=["il8","il10"], required=True)
-    parser.add_argument("--seed",     type=int,               required=True)
-    parser.add_argument("--data-dir", default="preprocessed/500x500",
-                        dest="data_dir",
-                        help="Path to preprocessed/500x500 directory")
-    args = parser.parse_args()
-    DATA_DIR = args.data_dir
-    run(args.cytokine, args.seed)
+    ap = argparse.ArgumentParser(); ap.add_argument("--cytokine", required=True); ap.add_argument("--seed", type=int, default=42); ap.add_argument("--data-dir", default=None)
+    args = ap.parse_args()
+    data_dir = args.data_dir if args.data_dir else str(next(Path("./preprocessed_200h").iterdir()))
+    run(data_dir, args.cytokine, args.seed)
