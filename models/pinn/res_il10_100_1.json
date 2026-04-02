@@ -11,7 +11,8 @@
         "lambda_bc": 0.013754568702283273
     },
     "optuna_best_val_loss": 0.04205123254952603,
-    "train_time_seconds": 2366.4,
+    "train_time_seconds": 2321.49,
+    "pred_time_seconds": 0.16,
     "results": {
         "Near_Horizon_t82_t91": {
             "Global_R2": 0.10527692901996155,
@@ -52,7 +53,7 @@
             "Unmasked_RMSE": 1.402064047497254e-09,
             "Avg_Dice": 0.16638535198875806,
             "Dice_Empty_Skipped": 0,
-            "Spatial_Correlation": 0.30829660388015034,
+            "Spatial_Correlation": 0.3082966038801504,
             "SSIM": 0.3248173323565985,
             "SSIM_Skipped_Frames": 0
         }

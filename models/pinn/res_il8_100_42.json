@@ -11,7 +11,8 @@
         "lambda_bc": 0.014845250326763969
     },
     "optuna_best_val_loss": 0.036633873605112735,
-    "train_time_seconds": 2381.83,
+    "train_time_seconds": 2339.39,
+    "pred_time_seconds": 0.14,
     "results": {
         "Near_Horizon_t82_t91": {
             "Global_R2": 0.8554796369907615,
@@ -31,7 +32,7 @@
             "Unmasked_RMSE": 8.054800330314912e-08,
             "Avg_Dice": 0.9200946224333129,
             "Dice_Empty_Skipped": 0,
-            "Spatial_Correlation": 0.9249658968276013,
+            "Spatial_Correlation": 0.9249658968276014,
             "SSIM": 0.8084413690272072,
             "SSIM_Skipped_Frames": 0
         },
@@ -52,7 +53,7 @@
             "Unmasked_RMSE": 8.374626540487882e-08,
             "Avg_Dice": 0.9213265780254952,
             "Dice_Empty_Skipped": 0,
-            "Spatial_Correlation": 0.9272416156849045,
+            "Spatial_Correlation": 0.9272416156849044,
             "SSIM": 0.8003948011912717,
             "SSIM_Skipped_Frames": 0
         }

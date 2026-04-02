@@ -11,7 +11,8 @@
         "lambda_bc": 0.014845250326763969
     },
     "optuna_best_val_loss": 0.036633873605112735,
-    "train_time_seconds": 2375.26,
+    "train_time_seconds": 2301.71,
+    "pred_time_seconds": 0.19,
     "results": {
         "Near_Horizon_t82_t91": {
             "Global_R2": 0.8580548753806646,
