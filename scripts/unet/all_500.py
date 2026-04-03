@@ -137,19 +137,24 @@ def run(cyt_name, seed, data_dir):
     tf.keras.backend.clear_session()
     model = build_unet(best["base_filters"], best["depth"], best["dropout"])
     opt = tf.keras.optimizers.Adam(best["lr"])
+    
+    print(f"Final training (max {FULL_EPOCHS} epochs)...", flush=True)
     t_start = time.time()
     do_train(model, opt, Xu_mmap, Yt, cyt_idx, tr_idx, vl_idx, best["batch_size"], FULL_EPOCHS)
     train_elapsed = time.time() - t_start
 
-    def evaluate(indices):
+    def evaluate_metrics(indices):
         preds = []
         for idx in indices:
             raw = Xu_mmap[idx:idx+1].astype(np.float32)
             xi = raw.transpose(0, 2, 3, 1, 4).reshape(1, GRID, GRID, 22) if raw.ndim == 5 else raw
             preds.append(model(xi, training=False).numpy()[0, :, :, 0])
+        
         if not preds: return {}
+        
         p_ph = np.clip((np.array(preds) + 1.0) / 2.0 * clip, 0, None)
         gt_ph = Yraw[[min(i+1, Yraw.shape[0]-1) for i in indices], ..., cyt_idx]
+        
         ssims = [ssim(gt_ph[t], p_ph[t], data_range=max(clip, 1e-12)) for t in range(len(indices)) if gt_ph[t].std() > 1e-12]
         return {
             "Global_R2": float(r2_score(gt_ph.flatten(), p_ph.flatten())),
@@ -157,18 +162,24 @@ def run(cyt_name, seed, data_dir):
             "SSIM": float(np.mean(ssims)) if ssims else 0.0
         }
 
+    print("Evaluating test horizons...", flush=True)
+    t_pred_start = time.time()
+    near_res = evaluate_metrics(ts_near_idx)
+    far_res = evaluate_metrics(ts_far_idx)
+    pred_elapsed = time.time() - t_pred_start
+
     res = {
-        "grid": 500, "seed": seed, "cytokine": cyt_name, "best_params": best,
+        "grid": 500, "seed": seed, "cytokine": cyt_name, "model": "unet", "best_params": best,
         "train_time_seconds": round(train_elapsed, 2),
-        "results": {"Near_Horizon": evaluate(ts_near_idx), "Far_Horizon": evaluate(ts_far_idx)}
+        "pred_time_seconds": round(pred_elapsed, 4),
+        "results": {"Near_Horizon": near_res, "Far_Horizon": far_res}
     }
+    
     out_path = f"{RESULTS_DIR}/res_{cyt_name}_500_{seed}.json"
     with open(out_path, "w") as f: json.dump(res, f, indent=2)
-    print(f"Saved: {out_path}")
+    print(f"DONE: {out_path} | Train: {train_elapsed:.1f}s | Pred: {pred_elapsed:.2f}s")
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cytokine", required=True)
-    ap.add_argument("--seed", type=int, required=True)
-    ap.add_argument("--data-dir", default="preprocessed_200h/500x500")
+    ap.add_argument("--cytokine", required=True); ap.add_argument("--seed", type=int, required=True); ap.add_argument("--data-dir", default="preprocessed_200h/500x500")
     args = ap.parse_args(); run(args.cytokine, args.seed, args.data_dir)
