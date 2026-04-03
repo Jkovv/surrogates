@@ -52,7 +52,8 @@ def build_unet(base_filters, depth, dropout_rate):
         x = tf.keras.layers.BatchNormalization()(x)
         x = tf.keras.layers.Conv2D(f, 3, padding="same", activation="relu")(x)
         x = tf.keras.layers.BatchNormalization()(x)
-    outputs = tf.keras.layers.Conv2D(1, 1)(x)
+    x = tf.keras.layers.Conv2D(1, 1)(x)
+    outputs = tf.keras.layers.Resizing(GRID, GRID)(x)
     return tf.keras.Model(inputs=inputs, outputs=outputs)
 
 def do_train(model, opt, Xu_mmap, Yt, cyt_idx, tr_idx, vl_idx, batch_size, epochs, verbose=True):
@@ -71,11 +72,9 @@ def do_train(model, opt, Xu_mmap, Yt, cyt_idx, tr_idx, vl_idx, batch_size, epoch
 
     def get_batch(idx):
         raw = Xu_mmap[idx].astype(np.float32)
-        # Reshape X_unet (B, G, G, 22)
-        if raw.ndim == 5: # if mmap (B, 2, G, G, 11)
+        if raw.ndim == 5:
             x = raw.transpose(0, 2, 3, 1, 4).reshape(len(idx), GRID, GRID, 22)
-        else: # if (B, G, G, 22)
-            x = raw
+        else: x = raw
         y = Yt[idx, :, :, cyt_idx:cyt_idx+1].astype(np.float32)
         return x, y
 
@@ -85,7 +84,8 @@ def do_train(model, opt, Xu_mmap, Yt, cyt_idx, tr_idx, vl_idx, batch_size, epoch
         np.random.shuffle(tr_idx)
         epoch_losses = []
         for s in range(0, len(tr_idx), batch_size):
-            x_b, y_b = get_batch(tr_idx[s:s+batch_size])
+            b_idx = tr_idx[s:s+batch_size]
+            x_b, y_b = get_batch(b_idx)
             epoch_losses.append(train_step(x_b, y_b))
         vl = float(val_step(x_v, y_v).numpy())
         if verbose and epoch % 5 == 0:
@@ -106,7 +106,6 @@ def run(cyt_name, seed, data_dir):
     cyt_idx = CYT_MAP[cyt_name]
     md = json.load(open(f"{data_dir}/metadata.json"))
     clip = float(md["scaling"]["max"][cyt_idx])
-
     Xu_mmap = np.load(f"{data_dir}/X_unet.npy", mmap_mode="r")
     Yt      = np.load(f"{data_dir}/Y_target.npy")
     Yraw    = np.load(f"{data_dir}/Y_raw_phys.npy")
@@ -119,8 +118,6 @@ def run(cyt_name, seed, data_dir):
     vl_idx = parse_split(md["splits"]["val"])
     ts_near_idx = parse_split(md["splits"]["test_near"])
     ts_far_idx  = parse_split(md["splits"]["test_far"])
-    
-    print(f"Splits: Train={len(tr_idx)}, Val={len(vl_idx)}, Near={len(ts_near_idx)}, Far={len(ts_far_idx)}")
 
     if seed == 42:
         def objective(trial):
@@ -148,34 +145,30 @@ def run(cyt_name, seed, data_dir):
         preds = []
         for idx in indices:
             raw = Xu_mmap[idx:idx+1].astype(np.float32)
-            if raw.ndim == 5:
-                xi = raw.transpose(0, 2, 3, 1, 4).reshape(1, GRID, GRID, 22)
-            else: xi = raw
+            xi = raw.transpose(0, 2, 3, 1, 4).reshape(1, GRID, GRID, 22) if raw.ndim == 5 else raw
             preds.append(model(xi, training=False).numpy()[0, :, :, 0])
-        p_phys = np.clip((np.array(preds) + 1.0) / 2.0 * clip, 0, None)
-        gt_phys = Yraw[indices + 1, ..., cyt_idx]
-        
-        r2 = float(r2_score(gt_phys.flatten(), p_phys.flatten()))
-        rmse = float(np.sqrt(np.mean((gt_phys - p_phys)**2)))
-        ssim_v = float(np.mean([ssim(gt_phys[t], p_phys[t], data_range=clip) for t in range(len(indices)) if gt_phys[t].std() > 1e-12]))
-        return {"Global_R2": r2, "Unmasked_RMSE": rmse, "SSIM": ssim_v}
+        if not preds: return {}
+        p_ph = np.clip((np.array(preds) + 1.0) / 2.0 * clip, 0, None)
+        gt_ph = Yraw[[min(i+1, Yraw.shape[0]-1) for i in indices], ..., cyt_idx]
+        ssims = [ssim(gt_ph[t], p_ph[t], data_range=max(clip, 1e-12)) for t in range(len(indices)) if gt_ph[t].std() > 1e-12]
+        return {
+            "Global_R2": float(r2_score(gt_ph.flatten(), p_ph.flatten())),
+            "Unmasked_RMSE": float(np.sqrt(np.mean((gt_ph - p_ph)**2))),
+            "SSIM": float(np.mean(ssims)) if ssims else 0.0
+        }
 
     res = {
         "grid": 500, "seed": seed, "cytokine": cyt_name, "best_params": best,
         "train_time_seconds": round(train_elapsed, 2),
-        "results": {
-            "Near_Horizon": evaluate(ts_near_idx),
-            "Far_Horizon": evaluate(ts_far_idx)
-        }
+        "results": {"Near_Horizon": evaluate(ts_near_idx), "Far_Horizon": evaluate(ts_far_idx)}
     }
     out_path = f"{RESULTS_DIR}/res_{cyt_name}_500_{seed}.json"
-    json.dump(res, open(out_path, "w"), indent=2)
-    print(f"Saved → {out_path}")
+    with open(out_path, "w") as f: json.dump(res, f, indent=2)
+    print(f"Saved: {out_path}")
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--cytokine", required=True)
     ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--data-dir", default="preprocessed_200h/500x500")
-    args = ap.parse_args()
-    run(args.cytokine, args.seed, args.data_dir)
+    args = ap.parse_args(); run(args.cytokine, args.seed, args.data_dir)
