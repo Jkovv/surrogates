@@ -3,6 +3,7 @@ import numpy as np
 import tensorflow as tf
 import optuna
 from sklearn.metrics import r2_score
+from scipy.stats import pearsonr
 from skimage.metrics import structural_similarity as ssim
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -17,7 +18,7 @@ if gpus:
         except RuntimeError: pass
 
 GRID         = 500
-RESULTS_DIR  = "models/unet"
+RESULTS_DIR  = "models/200hrs/unet"
 CYT_MAP      = {"il8": 0, "il10": 3}
 FULL_EPOCHS  = 200
 TUNE_EPOCHS  = 20
@@ -72,9 +73,7 @@ def do_train(model, opt, Xu_mmap, Yt, cyt_idx, tr_idx, vl_idx, batch_size, epoch
 
     def get_batch(idx):
         raw = Xu_mmap[idx].astype(np.float32)
-        if raw.ndim == 5:
-            x = raw.transpose(0, 2, 3, 1, 4).reshape(len(idx), GRID, GRID, 22)
-        else: x = raw
+        x = raw.transpose(0, 2, 3, 1, 4).reshape(len(idx), GRID, GRID, 22) if raw.ndim == 5 else raw
         y = Yt[idx, :, :, cyt_idx:cyt_idx+1].astype(np.float32)
         return x, y
 
@@ -84,8 +83,7 @@ def do_train(model, opt, Xu_mmap, Yt, cyt_idx, tr_idx, vl_idx, batch_size, epoch
         np.random.shuffle(tr_idx)
         epoch_losses = []
         for s in range(0, len(tr_idx), batch_size):
-            b_idx = tr_idx[s:s+batch_size]
-            x_b, y_b = get_batch(b_idx)
+            x_b, y_b = get_batch(tr_idx[s:s+batch_size])
             epoch_losses.append(train_step(x_b, y_b))
         vl = float(val_step(x_v, y_v).numpy())
         if verbose and epoch % 5 == 0:
@@ -98,6 +96,45 @@ def do_train(model, opt, Xu_mmap, Yt, cyt_idx, tr_idx, vl_idx, batch_size, epoch
     if best_w: model.set_weights(best_w)
     return best_val
 
+def _fisher_z(r):
+    r = np.clip(r, -0.9999, 0.9999)
+    return 0.5 * np.log((1.0 + r) / (1.0 - r))
+
+def calculate_metrics(yt, yp, masks, clip_max):
+    T = yt.shape[0]
+    ms = np.max(masks, axis=-1, keepdims=True)
+    sq = np.square(yt - yp)
+    rmse = float(np.sqrt(np.sum(sq * ms) / (np.sum(ms) + 1e-12)))
+    u_rmse = float(np.sqrt(np.mean(sq)))
+    r2 = float(r2_score(yt.flatten(), yp.flatten()))
+    
+    per_t_r2 = []
+    for t in range(T):
+        if np.std(yt[t]) > 1e-12:
+            per_t_r2.append(float(r2_score(yt[t].flatten(), yp[t].flatten())))
+        else: per_t_r2.append(float('nan'))
+    
+    dice_thr = 0.05 * clip_max if clip_max > 0 else 1e-9
+    dices, z_corrs, ssims = [], [], []
+    for t in range(T):
+        gt, pr = yt[t, ..., 0], yp[t, ..., 0]
+        gb, pb = (gt > dice_thr).astype(float), (pr > dice_thr).astype(float)
+        if np.sum(gb) + np.sum(pb) > 0:
+            dices.append(2.0 * np.sum(gb * pb) / (np.sum(gb) + np.sum(pb) + 1e-12))
+        if np.std(gt) > 1e-12 and np.std(pr) > 1e-12:
+            r_val = float(pearsonr(gt.flatten(), pr.flatten())[0])
+            if np.isfinite(r_val): z_corrs.append(_fisher_z(r_val))
+        if np.max(gt) - np.min(gt) > 1e-12:
+            ssims.append(ssim(gt, pr, data_range=max(clip_max, 1e-12)))
+            
+    return {
+        "Global_R2": r2, "Per_Timestep_R2": per_t_r2,
+        "Masked_RMSE": rmse, "Unmasked_RMSE": u_rmse,
+        "Avg_Dice": float(np.mean(dices)) if dices else 0.0,
+        "Spatial_Correlation": float(np.tanh(np.mean(z_corrs))) if z_corrs else 0.0,
+        "SSIM": float(np.mean(ssims)) if ssims else 0.0
+    }
+
 def run(cyt_name, seed, data_dir):
     print(f"\nUNet 500x500 (A100) | cytokine={cyt_name} | seed={seed}")
     np.random.seed(seed); tf.random.set_seed(seed)
@@ -109,6 +146,7 @@ def run(cyt_name, seed, data_dir):
     Xu_mmap = np.load(f"{data_dir}/X_unet.npy", mmap_mode="r")
     Yt      = np.load(f"{data_dir}/Y_target.npy")
     Yraw    = np.load(f"{data_dir}/Y_raw_phys.npy")
+    masks_spatial = np.load(f"{data_dir}/Y_masks_spatial.npy")
 
     def parse_split(s):
         start, end = s.split(':')
@@ -137,47 +175,38 @@ def run(cyt_name, seed, data_dir):
     tf.keras.backend.clear_session()
     model = build_unet(best["base_filters"], best["depth"], best["dropout"])
     opt = tf.keras.optimizers.Adam(best["lr"])
-    
-    print(f"Final training (max {FULL_EPOCHS} epochs)...", flush=True)
     t_start = time.time()
     do_train(model, opt, Xu_mmap, Yt, cyt_idx, tr_idx, vl_idx, best["batch_size"], FULL_EPOCHS)
     train_elapsed = time.time() - t_start
 
-    def evaluate_metrics(indices):
+    def evaluate_full(indices):
         preds = []
         for idx in indices:
             raw = Xu_mmap[idx:idx+1].astype(np.float32)
             xi = raw.transpose(0, 2, 3, 1, 4).reshape(1, GRID, GRID, 22) if raw.ndim == 5 else raw
             preds.append(model(xi, training=False).numpy()[0, :, :, 0])
         
-        if not preds: return {}
+        p_ph = np.clip((np.array(preds)[..., np.newaxis] + 1.0) / 2.0 * clip, 0, None)
+        gt_ph = Yraw[[min(i+1, Yraw.shape[0]-1) for i in indices], ..., cyt_idx:cyt_idx+1]
+        m_sp  = masks_spatial[[min(i, masks_spatial.shape[0]-1) for i in indices]]
         
-        p_ph = np.clip((np.array(preds) + 1.0) / 2.0 * clip, 0, None)
-        gt_ph = Yraw[[min(i+1, Yraw.shape[0]-1) for i in indices], ..., cyt_idx]
-        
-        ssims = [ssim(gt_ph[t], p_ph[t], data_range=max(clip, 1e-12)) for t in range(len(indices)) if gt_ph[t].std() > 1e-12]
-        return {
-            "Global_R2": float(r2_score(gt_ph.flatten(), p_ph.flatten())),
-            "Unmasked_RMSE": float(np.sqrt(np.mean((gt_ph - p_ph)**2))),
-            "SSIM": float(np.mean(ssims)) if ssims else 0.0
-        }
+        return calculate_metrics(gt_ph, p_ph, m_sp, clip)
 
-    print("Evaluating test horizons...", flush=True)
+    print("Final evaluation...", flush=True)
     t_pred_start = time.time()
-    near_res = evaluate_metrics(ts_near_idx)
-    far_res = evaluate_metrics(ts_far_idx)
+    near_res = evaluate_full(ts_near_idx)
+    far_res = evaluate_full(ts_far_idx)
     pred_elapsed = time.time() - t_pred_start
 
     res = {
         "grid": 500, "seed": seed, "cytokine": cyt_name, "model": "unet", "best_params": best,
-        "train_time_seconds": round(train_elapsed, 2),
-        "pred_time_seconds": round(pred_elapsed, 4),
+        "train_time_seconds": round(train_elapsed, 2), "pred_time_seconds": round(pred_elapsed, 4),
         "results": {"Near_Horizon": near_res, "Far_Horizon": far_res}
     }
     
     out_path = f"{RESULTS_DIR}/res_{cyt_name}_500_{seed}.json"
     with open(out_path, "w") as f: json.dump(res, f, indent=2)
-    print(f"DONE: {out_path} | Train: {train_elapsed:.1f}s | Pred: {pred_elapsed:.2f}s")
+    print(f"DONE: {out_path}")
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
