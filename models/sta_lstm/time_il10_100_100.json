@@ -1,0 +1,19 @@
+{
+    "model": "sta_lstm",
+    "grid": 100,
+    "cytokine": "il10",
+    "seed": 100,
+    "n_samples": 99,
+    "train_time_seconds": 25.17,
+    "pred_time_seconds": 0.2006,
+    "pred_time_std": 0.0045,
+    "pred_per_sample_ms": 2.0265,
+    "total_time_seconds": 25.37,
+    "pred_runs": [
+        0.2073,
+        0.1939,
+        0.198,
+        0.2022,
+        0.2017
+    ]
+}
