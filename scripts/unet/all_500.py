@@ -206,6 +206,9 @@ def run(cyt_name, seed, data_dir):
     
     out_path = f"{RESULTS_DIR}/res_{cyt_name}_500_{seed}.json"
     with open(out_path, "w") as f: json.dump(res, f, indent=2)
+    wgt_path = f"{RESULTS_DIR}/weights_{cyt_name}_500_{seed}.weights.h5"
+    model.save_weights(wgt_path)
+    print(f"  Weights saved: {wgt_path}")
     print(f"DONE: {out_path}")
 
 if __name__ == "__main__":
