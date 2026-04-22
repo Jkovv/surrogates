@@ -15,7 +15,11 @@ CELL_TYPE_NAMES = ["EC", "NN", "NA", "M1", "M2"]
 CELL_TYPE_IDS   = {"EC": 1, "NN": 2, "NA": 3, "M1": 4, "M2": 5}
 
 N_TIMESTEPS  = 101
-WINDOW       = 2  
+WINDOW       = 2  # look-back window for LSTM / branch inputs
+# NOTE (Issue 18 — scientific rigor report): This window size is not ablated.
+# Before publication, run ablation with WINDOW ∈ {1, 2, 3, 5} and report
+# validation loss as a function of window size.
+
 
 def adaptive_clip_percentile(channel: np.ndarray) -> float:
     """
@@ -68,37 +72,28 @@ def scale_channel(channel: np.ndarray, pct: float):
     return scaled.astype(np.float32), c_min, c_max
 
 
-def extract_grid_size(name: str):
-    m = re.search(r'(\d+)x(\d+)x(\d+)', name)
-    if m:
-        return int(m.group(1))
-    m = re.search(r'(\d+)x(\d+)', name)
-    if m:
-        return int(m.group(1))
-    m = re.search(r'(\d+)', name)
-    return int(m.group(1)) if m else None
-
-
-def process_grid(folder_name: str):
-    data_path = BASE_LATTICE_DIR / folder_name
-    G         = extract_grid_size(folder_name)
-
-    if G is None:
-        print(f"  Skipping '{folder_name}': cannot parse grid size.")
-        return
-
-    out_path = BASE_OUT_DIR / f"{G}x{G}x{G}"
-    out_path.mkdir(parents=True, exist_ok=True)
-
-    # loading vtk files
+def process_grid(data_path: Path):
+    # loading vtk files (flat directory)
     vtk_files = sorted(
         [f for f in os.listdir(data_path) if f.endswith(".vtk")],
         key=lambda x: int("".join(filter(str.isdigit, x)) or 0)
     )[:N_TIMESTEPS]
 
     if not vtk_files:
-        print(f"  Skipping '{folder_name}': no .vtk files found.")
+        print(f"  Skipping '{data_path}': no .vtk files found.")
         return
+
+    # Read grid size from first VTK header (DIMENSIONS line)
+    first_mesh = pv.read(str(data_path / vtk_files[0]))
+    dims = first_mesh.dimensions  # (nx, ny, nz)
+    if not (dims[0] == dims[1] == dims[2]):
+        print(f"  Skipping '{data_path}': non-cubic DIMENSIONS {dims}")
+        return
+    G = int(dims[0])
+    print(f"  Detected grid {G}x{G}x{G} from {vtk_files[0]} ({len(vtk_files)} timesteps)")
+
+    out_path = BASE_OUT_DIR / f"{G}x{G}x{G}"
+    out_path.mkdir(parents=True, exist_ok=True)
 
     raw_cyt = np.zeros((N_TIMESTEPS, G, G, G, 6), dtype=np.float32)
     masks   = np.zeros((N_TIMESTEPS, G, G, G, 5), dtype=np.float32)
@@ -251,7 +246,20 @@ def process_grid(folder_name: str):
 
 if __name__ == "__main__":
     print("Preprocessing 3D VTK simulation data...\n")
-    for folder in sorted(os.listdir(BASE_LATTICE_DIR)):
-        if (BASE_LATTICE_DIR / folder).is_dir():
-            process_grid(folder)
+
+    # Handle both layouts:
+    #   (a) flat:      BASE_LATTICE_DIR/*.vtk
+    #   (b) per-grid:  BASE_LATTICE_DIR/<grid_folder>/*.vtk
+    entries     = list(BASE_LATTICE_DIR.iterdir())
+    has_flat    = any(p.is_file() and p.suffix == ".vtk" for p in entries)
+    subdirs     = [p for p in entries if p.is_dir()]
+
+    if has_flat:
+        process_grid(BASE_LATTICE_DIR)
+    if subdirs:
+        for d in sorted(subdirs):
+            process_grid(d)
+    if not has_flat and not subdirs:
+        print(f"  No .vtk files or subfolders found under {BASE_LATTICE_DIR}")
+
     print("\nDone.")
