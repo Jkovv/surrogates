@@ -107,6 +107,43 @@ def _fisher_z(r):
 def _inv_fisher_z(z):
     return float(np.tanh(z))
 
+
+def compute_2d_slice_metrics(yt, yp, clip_max):
+    """
+    Per-axis 2D mid-slice metrics — addresses the supervisor's question
+    "in 3D, only 2D slices matter, biologists only see 2D slices".
+    For each of the three orthogonal mid-planes (xy at z=G/2, xz at y=G/2,
+    yz at x=G/2) we compute R² and SSIM averaged across T time steps.
+
+    yt, yp : (T, G, G, G, 1)
+    """
+    T = yt.shape[0]; G = yt.shape[1]
+    fixed_dr = float(clip_max) if clip_max > 0 else 1.0
+    mid = G // 2
+
+    out = {}
+    for axis_name, sl in (("xy_midplane_z",  np.s_[:, :, :, mid, 0]),
+                          ("xz_midplane_y",  np.s_[:, :, mid, :, 0]),
+                          ("yz_midplane_x",  np.s_[:, mid, :, :, 0])):
+        gts = yt[sl]; prs = yp[sl]
+        r2s, ssims, n_skip = [], [], 0
+        for t in range(T):
+            gt = gts[t]; pr = prs[t]
+            if np.std(gt) > 1e-12:
+                r2s.append(float(r2_score(gt.flatten(), pr.flatten())))
+            else:
+                n_skip += 1
+            dr = float(np.max(gt) - np.min(gt))
+            if dr > 1e-12:
+                ssims.append(float(ssim(gt, pr, data_range=fixed_dr)))
+        out[axis_name] = {
+            "R2":   float(np.mean(r2s))   if r2s   else 0.0,
+            "SSIM": float(np.mean(ssims)) if ssims else 0.0,
+            "Skipped_Frames": n_skip,
+        }
+    return out
+
+
 def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
                       masks: np.ndarray, clip_max: float) -> dict:
     """
@@ -181,6 +218,7 @@ def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
         "Spatial_Correlation": spatial_corr,
         "SSIM":                float(np.mean(ssims)) if ssims else 0.0,
         "SSIM_Skipped_Frames": n_ssim_skip,
+        "Slice_2D":            compute_2d_slice_metrics(y_t, y_p, clip_max),
     }
 
 
