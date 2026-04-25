@@ -11,6 +11,31 @@ from skimage.metrics import structural_similarity as ssim
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+# ----------------------------------------------------------------------
+# GPU setup (A100: enable memory_growth + bf16 mixed precision)
+# ----------------------------------------------------------------------
+def configure_gpu(use_mixed_precision=True):
+    gpus = tf.config.list_physical_devices("GPU")
+    for gpu in gpus:
+        try:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        except Exception as e:
+            print(f"  [warn] couldn't set memory_growth on {gpu}: {e}")
+    if gpus:
+        print(f"  [gpu] {len(gpus)} GPU(s) available")
+        if use_mixed_precision:
+            try:
+                tf.keras.mixed_precision.set_global_policy("mixed_bfloat16")
+                print(f"  [gpu] mixed precision: mixed_bfloat16 (A100 optimised)")
+            except Exception:
+                tf.keras.mixed_precision.set_global_policy("mixed_float16")
+    else:
+        print(f"  [gpu] NO GPU DETECTED — running on CPU (slow).")
+
+
+configure_gpu()
+
+
 N_TRIALS    = 20
 TUNE_EPOCHS = 30
 FULL_EPOCHS = 400
@@ -63,7 +88,8 @@ class DeepONet(tf.keras.Model):
         b = self.branch(xb, training=training)         # (batch, p)
         t = self.trunk(xt)                             # (batch, n_pts, p)
         r = tf.einsum("bp,bnp->bn", b, t) + self.bias  # (batch, n_pts)
-        return tf.expand_dims(r, -1)                   # (batch, n_pts, 1)
+        # cast back to float32 for numerically stable loss under mixed precision
+        return tf.cast(tf.expand_dims(r, -1), tf.float32)   # (batch, n_pts, 1)
 
 
 def build_branch_inputs(Xb, Xt, cyt_idx):
@@ -150,6 +176,33 @@ def masked_mse(pred, y, sz):
     mask = tf.cast(idx < tf.cast(sz[:, tf.newaxis, :], tf.int32), tf.float32)
     return tf.reduce_sum(tf.square(pred - y) * mask) / (tf.reduce_sum(mask) + 1e-8)
 
+
+def _make_steps(model, opt):
+    """
+    Build train/val tf.functions BOUND to a specific model + optimizer pair.
+
+    This is the fix for the XLA retracing hang: when the script runs multiple
+    Optuna trials (or sequential runs of different cytokines), each trial
+    creates a fresh model. A module-level @tf.function would try to retrace
+    on every new model, hitting XLA's "tf.Variable created inside tf.function"
+    error. Building tf.functions per-model avoids this entirely.
+    """
+    @tf.function(reduce_retracing=True)
+    def train_step(xb, xt, sz, y):
+        with tf.GradientTape() as tape:
+            loss = masked_mse(model([xb, xt], training=True), y, sz)
+        opt.apply_gradients(zip(tape.gradient(loss, model.trainable_variables),
+                                model.trainable_variables))
+        return loss
+
+    @tf.function(reduce_retracing=True)
+    def val_step(xb, xt, sz, y):
+        return masked_mse(model([xb, xt], training=False), y, sz)
+
+    return train_step, val_step
+
+
+# Backwards-compat eager versions (used by tests that call them directly).
 def train_step(model, opt, xb, xt, sz, y):
     with tf.GradientTape() as tape:
         loss = masked_mse(model([xb, xt], training=True), y, sz)
@@ -157,16 +210,29 @@ def train_step(model, opt, xb, xt, sz, y):
                             model.trainable_variables))
     return float(loss)
 
+
 def val_step(model, xb, xt, sz, y):
     return float(masked_mse(model([xb, xt], training=False), y, sz))
+
 
 def train_model(model, opt, ds_tr, ds_vl,
                 epochs, patience=40, reduce_patience=15, min_lr=1e-7,
                 verbose=True):
+    # Eager warmup — build all tf.Variables BEFORE the first tf.function call,
+    # otherwise variable creation inside the traced graph is forbidden.
+    for (xb, xt, sz), y in ds_tr.take(1):
+        _ = model([xb, xt], training=False)
+        break
+
+    train_step_fn, val_step_fn = _make_steps(model, opt)
+
     best_val = np.inf; best_w = None; wait = rw = 0
     for ep in range(1, epochs + 1):
-        tr = np.mean([train_step(model, opt, *b[0], b[1]) for b in ds_tr])
-        vl = np.mean([val_step(model, *b[0], b[1]) for b in ds_vl])
+        tr_losses = [float(train_step_fn(xb, xt, sz, y))
+                     for (xb, xt, sz), y in ds_tr]
+        vl_losses = [float(val_step_fn(xb, xt, sz, y))
+                     for (xb, xt, sz), y in ds_vl]
+        tr = float(np.mean(tr_losses)); vl = float(np.mean(vl_losses))
         if verbose and ep % 20 == 0:
             print(f"  Epoch {ep:4d}  loss={tr:.5f}  val={vl:.5f}")
         if vl < best_val:
@@ -209,6 +275,47 @@ def _fisher_z(r):
 
 def _inv_fisher_z(z):
     return float(np.tanh(z))
+
+
+def compute_2d_slice_metrics(yt, yp, clip_max):
+    """
+    Per-axis 2D mid-slice metrics.
+
+    Addresses the supervisor's first question — "in 3D, only 2D solutions
+    matter, biologists only see 2D slices". For each axis (xy mid-plane,
+    xz mid-plane, yz mid-plane) we compute R² and SSIM averaged across the
+    T time steps. This tells us how good the model is *as a 2D-slice
+    predictor*, which is the actually-observable quantity.
+
+    yt, yp : (T, G, G, G, 1)
+    """
+    T = yt.shape[0]; G = yt.shape[1]
+    fixed_dr = float(clip_max) if clip_max > 0 else 1.0
+    mid = G // 2
+
+    out = {}
+    for axis_name, sl in (("xy_midplane_z",  np.s_[:, :, :, mid, 0]),
+                          ("xz_midplane_y",  np.s_[:, :, mid, :, 0]),
+                          ("yz_midplane_x",  np.s_[:, mid, :, :, 0])):
+        gts = yt[sl]   # (T, G, G)
+        prs = yp[sl]
+        r2s, ssims, n_skip = [], [], 0
+        for t in range(T):
+            gt = gts[t]; pr = prs[t]
+            if np.std(gt) > 1e-12:
+                r2s.append(float(r2_score(gt.flatten(), pr.flatten())))
+            else:
+                n_skip += 1
+            dr = float(np.max(gt) - np.min(gt))
+            if dr > 1e-12:
+                ssims.append(float(ssim(gt, pr, data_range=fixed_dr)))
+        out[axis_name] = {
+            "R2":   float(np.mean(r2s))   if r2s   else 0.0,
+            "SSIM": float(np.mean(ssims)) if ssims else 0.0,
+            "Skipped_Frames": n_skip,
+        }
+    return out
+
 
 def calculate_metrics(y_true, y_pred, masks, clip_max):
     """
@@ -263,6 +370,7 @@ def calculate_metrics(y_true, y_pred, masks, clip_max):
         "Spatial_Correlation": _inv_fisher_z(float(np.mean(z_corrs))) if z_corrs else 0.0,
         "SSIM":                float(np.mean(ssims_v)) if ssims_v else 0.0,
         "SSIM_Skipped_Frames": n_ssim_skip,
+        "Slice_2D":            compute_2d_slice_metrics(yt, yp, clip_max),
     }
 
 def denormalize(x, clip_max):
@@ -291,13 +399,14 @@ def make_objective(Xbr_tr, Xtr_tr, Yf_tr,
         return float(best)
     return objective
 
-def run_pipeline(grid, seed, cytokine):
+def run_pipeline(grid, seed, cytokine, data_root="./preprocessed_3d",
+                 out_root="./models/deeponet_h_3d"):
     set_seed(seed)
     cyt_names = ["il8", "il1", "il6", "il10", "tnf", "tgf"]
     idx = cyt_names.index(cytokine.lower())
 
-    data_path = Path(f"./preprocessed_3d/{grid}x{grid}x{grid}")
-    out_dir   = Path("./models/deeponet_h_3d"); out_dir.mkdir(parents=True, exist_ok=True)
+    data_path = Path(f"{data_root}/{grid}x{grid}x{grid}")
+    out_dir   = Path(out_root); out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n[{cytokine.upper()}] {grid}x{grid}x{grid} — loading data...")
     Xb = np.load(data_path/"X_branch.npy").astype(np.float32)        # (N, 2, G, G, G, 11)
@@ -391,18 +500,25 @@ def run_pipeline(grid, seed, cytokine):
     with open(out_dir/f"res_{suffix}.json", "w") as f:
         json.dump(results, f, indent=4)
     model.save_weights(out_dir/f"weights_{suffix}.weights.h5")
-    print(f"DONE → models/deeponet_h_3d/res_{suffix}.json")
+    print(f"DONE → {out_dir}/res_{suffix}.json")
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--grid",     type=int, default=None)
     ap.add_argument("--cytokine", type=str, required=True)
     ap.add_argument("--seed",     type=int, default=42)
+    ap.add_argument("--data",     type=str, default="./preprocessed_3d",
+                    help="Root folder containing <G>x<G>x<G>/*.npy. Use "
+                         "./preprocessed_3d_grayscott for the PhysicsNemo benchmark.")
+    ap.add_argument("--out",      type=str, default="./models/deeponet_h_3d",
+                    help="Output folder for weights + JSON.")
     args = ap.parse_args()
 
     if args.grid:
-        run_pipeline(args.grid, args.seed, args.cytokine)
+        run_pipeline(args.grid, args.seed, args.cytokine,
+                     data_root=args.data, out_root=args.out)
     else:
-        for d in sorted(Path("./preprocessed_3d").iterdir()):
+        for d in sorted(Path(args.data).iterdir()):
             if d.is_dir():
-                run_pipeline(int(d.name.split("x")[0]), args.seed, args.cytokine)
+                run_pipeline(int(d.name.split("x")[0]), args.seed, args.cytokine,
+                             data_root=args.data, out_root=args.out)
