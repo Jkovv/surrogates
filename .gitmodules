@@ -1,6 +1,6 @@
 [submodule "surrogates_2D"]
-    path = surrogates_2D
-    url = https://github.com/Jkovv/surrogates_2D.git
+	path = surrogates_2D
+	url = https://github.com/Jkovv/surrogates_2D.git
 [submodule "surrogates_3D"]
     path = surrogates_3D
     url = https://github.com/Jkovv/surrogates_3D.git
