@@ -1,4 +1,4 @@
-# Burn Wound Cytokine Surrogates (2D / 3D)
+# Burn Wound Cytokine Surrogates (2D/3D)
 
 Neural surrogate models for the cytokine dynamics of an agent-based burn-wound
 simulation, split by spatial dimensionality (G=50):
