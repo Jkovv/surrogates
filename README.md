@@ -20,15 +20,14 @@ Both share the same cytokine set:
 PIPELINE: carve a corner -> preprocess -> train a DeepONet (2d or 3d) -> metrics
 ```
 
-A tiny VTK corner (16x16(x16), a few frames) is shipped in `demo_data/`, so you
-can clone the repo and run the demo with no data of your own:
+A small VTK corner (16x16(x16), a few frames) is shipped in `demo_data/`, so you can clone the repo and run the demo with no data of your own:
 
 ```bash
 pip install numpy scipy scikit-learn scikit-image pyvista
 python demo.py --dims both --cytokine il8
 ```
 
-This carves nothing new - it reads the bundled `demo_data/` corner, runs the real preprocessing, trains a light DeepONet, and prints metrics (Global R2,masked/unmasked RMSE, Dice, spatial correlation, SSIM). Results land in
+This carves nothing new - it reads the bundled `demo_data/` corner, runs the real preprocessing, trains a light DeepONet, and prints metrics (Global R2,masked/unmasked RMSE, Dice, spatial correlation, SSIM). Results land in:
 `demo_out/run_<stamp>__<cytokine>__c16/` as `results_2d.json`,
 `results_3d.json`, and `summary.json`.
 
@@ -56,11 +55,11 @@ This keeps only the [:16,:16(,:16)] corner of a few frames, so no full-resolutio
 
 | Flag | Meaning |
 |------|---------|
-| `--dims {2d,3d,both}` | Which pipeline(s) to run. |
-| `--cytokine il8` | Cytokine to train on. |
-| `--corner 16` | Corner edge length. |
-| `--epochs 60` | DeepONet training epochs. |
-| `--max-frames 40` | Cap frames per dimension. |
+| `--dims {2d,3d,both}` | which pipeline(s) to run |
+| `--cytokine il8` | cytokine to train on |
+| `--corner 16` | corner edge length |
+| `--epochs 60` | deepONet training no. epochs |
+| `--max-frames 40` | cap frames per dimension |
 
 ## Data format
 `Step_*.vtk` (CompuCell3D output)
