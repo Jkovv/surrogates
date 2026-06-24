@@ -58,7 +58,7 @@ This keeps only the [:16,:16(,:16)] corner of a few frames, so no full-resolutio
 | `--dims {2d,3d,both}` | which pipeline(s) to run |
 | `--cytokine il8` | cytokine to train on |
 | `--corner 16` | corner edge length |
-| `--epochs 60` | deepONet training no. epochs |
+| `--epochs 60` | deepONet training; no. epochs |
 | `--max-frames 40` | cap frames per dimension |
 
 ## Data format
